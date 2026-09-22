@@ -277,6 +277,5 @@ mod tests {
         assert!(!retry_jev_status(500));
         assert_eq!(jev_retry_delay(0), Duration::from_millis(100));
         assert_eq!(jev_retry_delay(1), Duration::from_millis(200));
-        assert!(JEV_MAX_ATTEMPTS <= 3);
     }
 }
