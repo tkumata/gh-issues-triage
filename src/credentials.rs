@@ -1,7 +1,20 @@
 use keyring::Entry;
+use serde::{Deserialize, Serialize};
 
 const CREDENTIAL_SERVICE: &str = "gh-issues-triage";
 const CREDENTIAL_USERNAME: &str = "github.com";
+
+pub(crate) struct Credentials {
+    pub(crate) access_token: String,
+    pub(crate) refresh_token: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredCredentials {
+    access_token: String,
+    #[serde(default)]
+    refresh_token: Option<String>,
+}
 
 #[derive(Debug)]
 pub(crate) enum CredentialError {
@@ -21,9 +34,7 @@ impl std::fmt::Display for CredentialError {
             Self::CredentialWriteFailed => {
                 formatter.write_str("could not save GitHub access token")
             }
-            Self::NotLoggedIn => {
-                formatter.write_str("no GitHub access token is stored; run login first")
-            }
+            Self::NotLoggedIn => formatter.write_str("no GitHub credentials are stored"),
             Self::CredentialReadFailed => formatter.write_str("could not read GitHub access token"),
             Self::InvalidResponse => formatter.write_str("GitHub returned an invalid response"),
         }
@@ -43,21 +54,52 @@ pub(crate) fn ensure_available() -> Result<(), CredentialError> {
     }
 }
 
-pub(crate) fn save_token(token: &str) -> Result<(), CredentialError> {
-    if token.is_empty() {
+pub(crate) fn save_credentials(credentials: &Credentials) -> Result<(), CredentialError> {
+    if credentials.access_token.is_empty()
+        || credentials
+            .refresh_token
+            .as_ref()
+            .is_some_and(String::is_empty)
+    {
         return Err(CredentialError::InvalidResponse);
     }
+    let value = serde_json::to_string(&StoredCredentials {
+        access_token: credentials.access_token.clone(),
+        refresh_token: credentials.refresh_token.clone(),
+    })
+    .map_err(|_| CredentialError::InvalidResponse)?;
     entry()?
-        .set_password(token)
+        .set_password(&value)
         .map_err(|_| CredentialError::CredentialWriteFailed)
 }
 
-pub(crate) fn load_token() -> Result<String, CredentialError> {
+pub(crate) fn load_credentials() -> Result<Credentials, CredentialError> {
     match entry()?.get_password() {
-        Ok(token) if !token.is_empty() => Ok(token),
+        Ok(value) if !value.is_empty() => parse_credentials(&value),
         Ok(_) => Err(CredentialError::CredentialReadFailed),
         Err(error) => Err(classify_credential_read_error(error)),
     }
+}
+
+fn parse_credentials(value: &str) -> Result<Credentials, CredentialError> {
+    if value.trim_start().starts_with('{') {
+        let stored = serde_json::from_str::<StoredCredentials>(value)
+            .map_err(|_| CredentialError::CredentialReadFailed)?;
+        if stored.access_token.is_empty()
+            || stored.refresh_token.as_ref().is_some_and(String::is_empty)
+        {
+            return Err(CredentialError::CredentialReadFailed);
+        }
+        return Ok(Credentials {
+            access_token: stored.access_token,
+            refresh_token: stored.refresh_token,
+        });
+    }
+    // Values saved by earlier versions contain only the access token.
+    Ok(Credentials {
+        access_token: value.to_owned(),
+        refresh_token: None,
+    })
 }
 
 fn classify_credential_read_error(error: keyring::Error) -> CredentialError {
@@ -84,5 +126,32 @@ mod tests {
             )),
             CredentialError::CredentialReadFailed
         ));
+    }
+
+    #[test]
+    fn reads_both_credential_formats_without_exposing_tokens() {
+        let old = parse_credentials("gho_legacy").unwrap();
+        assert_eq!(old.access_token, "gho_legacy");
+        assert_eq!(old.refresh_token, None);
+
+        let current =
+            parse_credentials(r#"{"access_token":"gho_access","refresh_token":"ghr_refresh"}"#)
+                .unwrap();
+        assert_eq!(current.access_token, "gho_access");
+        assert_eq!(current.refresh_token.as_deref(), Some("ghr_refresh"));
+    }
+
+    #[test]
+    fn rejects_corrupt_json_credentials() {
+        for value in [
+            "{broken",
+            r#"{"access_token":"","refresh_token":"ghr_refresh"}"#,
+            r#"{"access_token":"gho_access","refresh_token":""}"#,
+        ] {
+            assert!(matches!(
+                parse_credentials(value),
+                Err(CredentialError::CredentialReadFailed)
+            ));
+        }
     }
 }

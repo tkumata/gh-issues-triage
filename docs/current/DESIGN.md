@@ -9,34 +9,28 @@
 
 ## 処理フロー
 
-### Login
-
-```text
-CLI
- └─ Device Flow 開始
-     ├─ 確認 URL / user code 表示
-     ├─ 認証完了まで規定間隔でポーリング
-     └─ token 保存
-```
-
 ### Triage
 
 ```text
 CLI 引数検証
- └─ token 読み込み
-     └─ GitHub REST API から最新 open Issue を最大10件取得
-         └─ 全 Issue を1回の Jev リクエストで Score 化
-            └─ Scoreを検証して安定ソート
-                 └─ 端末幅に合わせてテーブルを描画
+ └─ 認証情報の取得
+     ├─ 有効な access token はそのまま使用
+     ├─ 失効時は refresh token で更新して保存
+     └─ 未保存・refresh token なし/失効時は Device Flow で認証して保存
+          ↓
+     GitHub REST API から最新 open Issue を最大10件取得
+      └─ 全 Issue を1回の Jev リクエストで Score 化
+          └─ Score を検証して安定ソート
+              └─ 端末幅に合わせてテーブルを描画
 ```
 
 ## 責務
 
 | 責務 | 内容 |
 | --- | --- |
-| CLI | `login` と `<owner>/<repo>` の識別、usage、終了コード |
-| GitHub authentication | Device Flow の開始、ポーリング規則、GitHub エラーの解釈 |
-| credential storage | OS の資格情報ストアを使った GitHub App user access token の保存と読み込み |
+| CLI | `<owner>/<repo>` の検証、usage、終了コード |
+| GitHub authentication | 保存済み token の利用、refresh、必要時の Device Flow、GitHub エラーの解釈 |
+| credential storage | OS の資格情報ストアを使った GitHub App user access token と refresh token の保存と読み込み |
 | GitHub issues | REST API ページング、pull request 除外、最大10件への制限 |
 | triage | Jev request の構築、Score 応答検証、安定ソート |
 | presentation | Unicode 表示幅に基づく折り返し、列幅配分、罫線描画 |
@@ -60,6 +54,7 @@ RankedIssue { issue, score }
 ### GitHub
 
 - GitHub App は Device Flow を有効にする。
+- access token 失効時は refresh token で更新する。`bad_refresh_token` は Device Flow に進み、その他の更新エラーは失敗として扱う。
 - Device Flow の `interval`、`expires_in`、`slow_down` を GitHub の応答どおり扱う。
 - Issues REST endpoint は pull request も返すため、`pull_request` の有無で除外する。
 - HTTP status と GitHub の error body を、秘密情報を除いて利用者向けエラーへ変換する。
@@ -67,7 +62,8 @@ RankedIssue { issue, score }
 ### 認証情報保存
 
 - GitHub App client ID は `GITHUB_CLIENT_ID` 環境変数から取得する。
-- GitHub App user access token はサービス名 `gh-issues-triage`、アカウント名 `github.com` で OS の資格情報ストアへ保存する。
+- GitHub App user access token と、発行された場合の refresh token はサービス名 `gh-issues-triage`、アカウント名 `github.com` で OS の資格情報ストアへ保存する。
+- 旧版が保存した access token 単体の値も読み取れるようにする。
 - macOS Keychain または Linux Secret Service が利用不能な場合は失敗し、平文ファイルへ fallback しない。
 
 ### TypeSafe
@@ -91,5 +87,5 @@ RankedIssue { issue, score }
 ## 検証境界
 
 - 単体テスト: 引数解析、repository 解析、Score 検証、安定ソート、Unicode 折り返し、列幅と罫線。
-- HTTP 境界テスト: 保存済み応答を用いた Device Flow 状態遷移、GitHub ページングと PR 除外、Jev 応答検証。実サービスの自己模倣を避け、送信内容と観測可能な結果を確認する。
+- HTTP 境界テスト: 保存済み応答を用いた refresh と Device Flow の状態遷移、GitHub ページングと PR 除外、Jev 応答検証。実サービスの自己模倣を避け、送信内容と観測可能な結果を確認する。
 - 手動確認: 実 GitHub App の Device Flow、実アカウントの repository 権限、実 TypeSafe API、実ターミナルでの表示。

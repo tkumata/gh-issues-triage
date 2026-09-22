@@ -1,19 +1,17 @@
 use crate::model::RepositoryRef;
 
-pub(crate) const USAGE: &str = "Usage: gh-issues-triage login | gh-issues-triage <owner>/<repo>";
+pub(crate) const USAGE: &str = "Usage: gh-issues-triage <owner>/<repo>";
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Command {
-    Login,
     Repository(RepositoryRef),
 }
 
 pub(crate) fn parse_args(args: &[String]) -> Result<Command, String> {
     match args {
         [] => Err("a command or repository is required".to_owned()),
-        [command] if command == "login" => Ok(Command::Login),
         [value] => parse_repository(value),
-        _ => Err("exactly one command or repository is required".to_owned()),
+        _ => Err("exactly one repository is required".to_owned()),
     }
 }
 
@@ -44,8 +42,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_login_and_repository() {
-        assert_eq!(parse_args(&args(&["login"])), Ok(Command::Login));
+    fn accepts_repository() {
         assert_eq!(
             parse_args(&args(&["octo-org/widgets"])),
             Ok(Command::Repository(RepositoryRef {
@@ -58,6 +55,7 @@ mod tests {
     #[test]
     fn rejects_invalid_repositories() {
         for value in [
+            "login",
             "logout",
             "/repo",
             "owner/",

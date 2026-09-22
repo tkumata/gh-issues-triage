@@ -81,20 +81,7 @@ fn http_client() -> Result<Client, AuthError> {
         .map_err(|_| AuthError::HttpRequest { timeout: false })
 }
 
-fn run_repository(repository: RepositoryRef) -> Result<(), AppError> {
-    let token = credentials::load_token()?;
-    let client = http_client()?;
-    let issues = fetch_issues(&client, &token, &repository)?;
-    let ranked = if issues.is_empty() {
-        triage_issues(&client, "", issues)?
-    } else {
-        triage_issues(&client, &typesafe_api_key()?, issues)?
-    };
-    println!("{}", render_table(&ranked, terminal_width()?)?);
-    Ok(())
-}
-
-fn login(client: &Client) -> Result<(), AppError> {
+fn device_authorize(client: &Client) -> Result<credentials::Credentials, AppError> {
     credentials::ensure_available()?;
     let client_id = auth::client_id()?;
     let device = auth::request_device_code(client, &client_id)?;
@@ -102,8 +89,58 @@ fn login(client: &Client) -> Result<(), AppError> {
         "Open {} and enter code {}",
         device.verification_uri, device.user_code
     );
-    let token = auth::poll_access_token(client, &client_id, &device)?;
-    credentials::save_token(&token)?;
+    let tokens = auth::poll_access_token(client, &client_id, &device)?;
+    let credentials = credentials::Credentials {
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token,
+    };
+    Ok(credentials)
+}
+
+fn run_repository(repository: RepositoryRef) -> Result<(), AppError> {
+    let client = http_client()?;
+    let stored = match credentials::load_credentials() {
+        Ok(credentials) => Some(credentials),
+        Err(CredentialError::NotLoggedIn) => None,
+        Err(error) => return Err(AppError::Credential(error)),
+    };
+    let stored = match stored {
+        Some(credentials) => credentials,
+        None => {
+            let credentials = device_authorize(&client)?;
+            credentials::save_credentials(&credentials)?;
+            credentials
+        }
+    };
+    let issues = match fetch_issues(&client, &stored.access_token, &repository) {
+        Ok(issues) => issues,
+        Err(GithubError::HttpStatus { status: 401 }) => {
+            let refreshed = if let Some(refresh_token) = stored.refresh_token.as_deref() {
+                let client_id = auth::client_id()?;
+                match auth::refresh_access_token(&client, &client_id, refresh_token) {
+                    Ok(tokens) => credentials::Credentials {
+                        access_token: tokens.access_token,
+                        refresh_token: tokens.refresh_token,
+                    },
+                    Err(AuthError::Failure(auth::AuthFailure::BadRefreshToken)) => {
+                        device_authorize(&client)?
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            } else {
+                device_authorize(&client)?
+            };
+            credentials::save_credentials(&refreshed)?;
+            fetch_issues(&client, &refreshed.access_token, &repository)?
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let ranked = if issues.is_empty() {
+        triage_issues(&client, "", issues)?
+    } else {
+        triage_issues(&client, &typesafe_api_key()?, issues)?
+    };
+    println!("{}", render_table(&ranked, terminal_width()?)?);
     Ok(())
 }
 
@@ -117,9 +154,6 @@ fn main() {
         }
     };
     let result = match command {
-        Command::Login => http_client()
-            .map_err(AppError::from)
-            .and_then(|client| login(&client)),
         Command::Repository(repository) => run_repository(repository),
     };
     if let Err(reason) = result {
