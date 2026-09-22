@@ -32,3 +32,5 @@ cargo run -- gh-username/gh-reponame
 repository 指定では、保存済み token で GitHub の open Issue を新しい順に最大10件取得し、pull request を除外します。全 Issue を1回の TypeSafe Jev リクエストで重要度判定し、端末幅に合わせた Unicode 対応テーブルで表示します。
 
 GitHub または TypeSafe の応答、認証情報、端末幅の取得に失敗した場合は、途中結果を表示せず非ゼロで終了します。実 GitHub App、TypeSafe API、実端末での目視確認は別途必要です。
+
+![GitHub Issues Triage](./docs/images/gh-issues-triage-screenshot.png)
