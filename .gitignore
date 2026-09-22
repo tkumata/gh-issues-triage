@@ -1,2 +1,5 @@
 .DS_Store
 /target/
+
+# Added by harness installer
+.agent-hooks/state/
