@@ -7,7 +7,6 @@
 ## CLI
 
 ```text
-gh-issues-triage login
 gh-issues-triage <owner>/<repo>
 ```
 
@@ -15,17 +14,20 @@ gh-issues-triage <owner>/<repo>
 - `owner` と `repo` は空文字を許可しない。余分なパス要素を許可しない。
 - 成功時は終了コード `0`、入力・認証・通信・応答・保存・表示の失敗時は非ゼロとする。
 
-## `login`
+## 認証
 
-1. GitHub App の client ID を `GITHUB_CLIENT_ID` 環境変数から読み込む。未設定または空の場合は失敗する。
-2. `POST https://github.com/login/device/code` で `device_code`、`user_code`、`verification_uri`、`expires_in`、`interval` を取得する。
-3. `verification_uri` と `user_code` を表示する。ブラウザの自動起動は行わない。
-4. GitHub が返した `interval` 以上の間隔で `POST https://github.com/login/oauth/access_token` をポーリングする。
-5. `authorization_pending` は待機を継続し、`slow_down` は GitHub の指示どおり待機間隔を延長する。
-6. 成功時だけ GitHub user access token を OS の資格情報ストアへ保存する。
-7. 拒否、期限切れ、不正な client ID、Device Flow 無効化、通信失敗は理由を示して失敗終了する。
+1. 保存済み access token が有効なら、Issue の取得にそのまま使用する。旧版が保存した access token 単体の値も読み取る。
+2. access token が失効した場合、保存済み refresh token があれば `POST https://github.com/login/oauth/access_token` に `client_id`、`grant_type=refresh_token`、`refresh_token` を送り、token を更新する。Device Flow で発行した token のため client secret は使用しない。
+3. 更新後の access token と refresh token を組として OS の資格情報ストアへ保存し、新しい access token で Issue 取得を再試行する。
+4. 認証情報が未保存、refresh token がない、または GitHub が `bad_refresh_token` を返した場合だけ Device Flow を開始する。資格情報ストアや通信の失敗、その他の更新エラー、repository の権限不足は理由を示して失敗終了する。
+5. Device Flow では、GitHub App の client ID を `GITHUB_CLIENT_ID` 環境変数から読み込む。未設定または空の場合は失敗する。
+6. `POST https://github.com/login/device/code` で `device_code`、`user_code`、`verification_uri`、`expires_in`、`interval` を取得する。
+7. `verification_uri` と `user_code` を表示する。ブラウザの自動起動は行わない。
+8. GitHub が返した `interval` 以上の間隔で `POST https://github.com/login/oauth/access_token` をポーリングする。
+9. `authorization_pending` は待機を継続し、`slow_down` は GitHub の指示どおり待機間隔を延長する。
+10. 成功時だけ access token と、発行された場合の refresh token を資格情報ストアへ保存し、Issue 取得を続ける。拒否、期限切れ、不正な client ID、Device Flow 無効化、通信失敗は理由を示して失敗終了する。
 
-初期版は access token の更新を行わない。token が失効した場合は `login` を再実行する。
+`GITHUB_CLIENT_ID` は token 更新または Device Flow が必要になったときに読み込む。
 
 ## `<owner>/<repo>`
 
@@ -88,7 +90,7 @@ gh-issues-triage <owner>/<repo>
 
 - `TYPESAFE_API_KEY` は環境変数から取得し、永続保存しない。
 - GitHub App client ID は `GITHUB_CLIENT_ID` 環境変数から取得する。client secret と PAT は使用しない。
-- GitHub App user access token はサービス名 `gh-issues-triage`、アカウント名 `github.com` で OS の資格情報ストアへ保存する。
+- GitHub App user access token と、発行された場合の refresh token はサービス名 `gh-issues-triage`、アカウント名 `github.com` で OS の資格情報ストアへ保存する。
 - macOS では Keychain、Linux では Secret Service を使用する。利用不能時は失敗し、平文ファイルへ fallback しない。
 - 秘密情報をエラー本文へ含めない。
 

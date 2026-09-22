@@ -12,6 +12,25 @@ const CLIENT_ID_ENV: &str = "GITHUB_CLIENT_ID";
 const DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 const ACCESS_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 
+#[derive(PartialEq, Eq)]
+pub(crate) struct TokenSet {
+    pub(crate) access_token: String,
+    pub(crate) refresh_token: Option<String>,
+}
+
+impl fmt::Debug for TokenSet {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TokenSet")
+            .field("access_token", &"[redacted]")
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "[redacted]"),
+            )
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DeviceCode {
     device_code: String,
@@ -33,13 +52,14 @@ struct DeviceCodeResponse {
 #[derive(Debug, Deserialize)]
 struct TokenResponse {
     access_token: Option<String>,
+    refresh_token: Option<String>,
     error: Option<String>,
     interval: Option<u64>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum PollDecision {
-    Success(String),
+    Success(TokenSet),
     Pending,
     SlowDown(Option<Duration>),
     Failure(AuthFailure),
@@ -53,6 +73,7 @@ pub(crate) enum AuthFailure {
     IncorrectDeviceCode,
     DeviceFlowDisabled,
     UnsupportedGrantType,
+    BadRefreshToken,
     Unknown,
 }
 
@@ -76,6 +97,7 @@ impl Display for AuthFailure {
             Self::IncorrectDeviceCode => "device code was rejected",
             Self::DeviceFlowDisabled => "device flow is disabled for this GitHub App",
             Self::UnsupportedGrantType => "device flow grant type is unsupported",
+            Self::BadRefreshToken => "GitHub rejected the saved refresh token",
             Self::Unknown => "GitHub returned an unsupported OAuth error",
         };
         formatter.write_str(message)
@@ -136,7 +158,10 @@ fn parse_token_response(status: u16, body: &str) -> Result<PollDecision, AuthErr
         if token.is_empty() || response.error.is_some() {
             return Err(AuthError::InvalidResponse);
         }
-        return Ok(PollDecision::Success(token));
+        return Ok(PollDecision::Success(TokenSet {
+            access_token: token,
+            refresh_token: response.refresh_token,
+        }));
     }
     match response.error.as_deref() {
         Some("authorization_pending") => Ok(PollDecision::Pending),
@@ -155,6 +180,7 @@ fn parse_token_response(status: u16, body: &str) -> Result<PollDecision, AuthErr
         Some("unsupported_grant_type") => {
             Ok(PollDecision::Failure(AuthFailure::UnsupportedGrantType))
         }
+        Some("bad_refresh_token") => Ok(PollDecision::Failure(AuthFailure::BadRefreshToken)),
         Some(error) if !error.is_empty() => Ok(PollDecision::Failure(AuthFailure::Unknown)),
         _ => Err(AuthError::InvalidResponse),
     }
@@ -197,7 +223,7 @@ pub(crate) fn poll_access_token(
     client: &Client,
     client_id: &str,
     device: &DeviceCode,
-) -> Result<String, AuthError> {
+) -> Result<TokenSet, AuthError> {
     let started = Instant::now();
     let deadline = started
         .checked_add(device.expires_in)
@@ -234,6 +260,46 @@ pub(crate) fn poll_access_token(
     }
 }
 
+pub(crate) fn refresh_access_token(
+    client: &Client,
+    client_id: &str,
+    refresh_token: &str,
+) -> Result<TokenSet, AuthError> {
+    let response = client
+        .post(ACCESS_TOKEN_URL)
+        .query(&[
+            ("client_id", client_id),
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+        ])
+        .header(ACCEPT, "application/json")
+        .send()
+        .map_err(|error| AuthError::HttpRequest {
+            timeout: error.is_timeout(),
+        })?;
+    let status = response.status().as_u16();
+    let body = response.text().map_err(|error| AuthError::HttpRequest {
+        timeout: error.is_timeout(),
+    })?;
+    parse_refresh_response(status, &body)
+}
+
+fn parse_refresh_response(status: u16, body: &str) -> Result<TokenSet, AuthError> {
+    match parse_token_response(status, body)? {
+        PollDecision::Success(tokens)
+            if tokens
+                .refresh_token
+                .as_ref()
+                .is_some_and(|refresh_token| !refresh_token.is_empty()) =>
+        {
+            Ok(tokens)
+        }
+        PollDecision::Success(_) => Err(AuthError::InvalidResponse),
+        PollDecision::Failure(failure) => Err(AuthError::Failure(failure)),
+        PollDecision::Pending | PollDecision::SlowDown(_) => Err(AuthError::InvalidResponse),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,7 +331,10 @@ mod tests {
                 r#"{"access_token":"token-secret","token_type":"bearer"}"#
             )
             .unwrap(),
-            PollDecision::Success("token-secret".to_owned())
+            PollDecision::Success(TokenSet {
+                access_token: "token-secret".to_owned(),
+                refresh_token: None,
+            })
         );
         assert!(matches!(
             parse_token_response(500, r#"{"error":"device_flow_disabled"}"#),
@@ -274,6 +343,34 @@ mod tests {
         assert!(matches!(
             parse_token_response(200, "not-json"),
             Err(AuthError::InvalidJson)
+        ));
+    }
+
+    #[test]
+    fn requires_rotated_tokens_and_classifies_bad_refresh_token() {
+        assert_eq!(
+            parse_refresh_response(
+                200,
+                r#"{"access_token":"new-access","refresh_token":"new-refresh"}"#
+            )
+            .unwrap(),
+            TokenSet {
+                access_token: "new-access".to_owned(),
+                refresh_token: Some("new-refresh".to_owned()),
+            }
+        );
+        for body in [
+            r#"{"access_token":"new-access"}"#,
+            r#"{"access_token":"new-access","refresh_token":""}"#,
+        ] {
+            assert!(matches!(
+                parse_refresh_response(200, body),
+                Err(AuthError::InvalidResponse)
+            ));
+        }
+        assert!(matches!(
+            parse_refresh_response(200, r#"{"error":"bad_refresh_token"}"#),
+            Err(AuthError::Failure(AuthFailure::BadRefreshToken))
         ));
     }
 
@@ -301,6 +398,7 @@ mod tests {
             ("incorrect_device_code", AuthFailure::IncorrectDeviceCode),
             ("device_flow_disabled", AuthFailure::DeviceFlowDisabled),
             ("unsupported_grant_type", AuthFailure::UnsupportedGrantType),
+            ("bad_refresh_token", AuthFailure::BadRefreshToken),
         ] {
             assert_eq!(
                 parse_token_response(200, &format!(r#"{{"error":"{code}"}}"#)).unwrap(),

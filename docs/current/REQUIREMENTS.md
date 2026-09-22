@@ -12,11 +12,13 @@ GitHub リポジトリの直近の Issue を、人が最初に確認すべき順
 
 ### 認証
 
-- `gh-issues-triage login` は GitHub App の Device Flow を開始する。
-- CLI は確認 URL とアクセスコードを表示し、ユーザーによるブラウザ認証の完了を待つ。
-- 認証成功後、後続の実行で利用できるよう認証情報を保存して終了する。
+- `gh-issues-triage <owner>/<repo>` の実行時、保存済み access token が有効ならそのまま使用する。
+- access token が失効した場合は、保存済み refresh token で自動更新する。
+- 認証情報が未保存、refresh token がない、または失効した場合だけ GitHub App の Device Flow を開始する。
+- Device Flow では確認 URL とアクセスコードを表示し、ユーザーによるブラウザ認証の完了を待つ。
+- 認証成功・更新後は、後続の実行で利用できるよう認証情報を保存して Issue 取得を続ける。
 - GitHub App の client ID は `GITHUB_CLIENT_ID` 環境変数から取得する。
-- GitHub App user access token は OS の資格情報ストアへ保存する。
+- GitHub App user access token と、発行された場合の refresh token は OS の資格情報ストアへ保存する。
 - PAT と平文ファイルへの fallback は使用しない。
 - クライアントシークレットを配布物またはローカル設定へ保存しない。
 
@@ -47,7 +49,9 @@ GitHub リポジトリの直近の Issue を、人が最初に確認すべき順
 
 ## 受け入れ条件
 
-- 未認証状態から `login` を実行し、Device Flow の案内を経て認証を保存できる。
+- 未認証状態から `<owner>/<repo>` を実行し、Device Flow の案内を経て認証を保存し、Issue を表示できる。
+- 有効な access token は再認証せず使用し、失効時は refresh token で更新できる。
+- refresh token がないか失効している場合だけ Device Flow を開始する。
 - 認証済み状態で `<owner>/<repo>` を実行すると、最大10件の open Issue が重要度順に表示される。
 - pull request が混在するリポジトリでも、表示対象は Issue のみである。
 - テーブル幅、配置、padding、折り返しが「表示」の要求を満たす。

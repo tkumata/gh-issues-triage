@@ -28,7 +28,7 @@ impl std::fmt::Display for GithubError {
             Self::HttpStatus { status } => {
                 if *status == 404 {
                     formatter.write_str(
-                        "GitHub repository was not found or the saved token has no access; install the GitHub App on the repository and run login again (HTTP 404)",
+                        "GitHub repository was not found or the saved token has no access; install the GitHub App on the repository (HTTP 404)",
                     )
                 } else {
                     write!(formatter, "GitHub issues returned HTTP {status}")
@@ -168,7 +168,7 @@ mod tests {
         let message = GithubError::HttpStatus { status: 404 }.to_string();
         assert!(message.contains("repository was not found"));
         assert!(message.contains("saved token has no access"));
-        assert!(message.contains("run login again"));
+        assert!(message.contains("install the GitHub App"));
     }
 
     #[test]
