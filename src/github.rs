@@ -26,7 +26,13 @@ impl std::fmt::Display for GithubError {
                 formatter.write_str("GitHub issues request failed")
             }
             Self::HttpStatus { status } => {
-                write!(formatter, "GitHub issues returned HTTP {status}")
+                if *status == 404 {
+                    formatter.write_str(
+                        "GitHub repository was not found or the saved token has no access; install the GitHub App on the repository and run login again (HTTP 404)",
+                    )
+                } else {
+                    write!(formatter, "GitHub issues returned HTTP {status}")
+                }
             }
             Self::InvalidJson => formatter.write_str("GitHub issues returned invalid JSON"),
             Self::InvalidResponse => {
@@ -51,7 +57,13 @@ fn parse_github_issues_page(
     if !(200..300).contains(&status) {
         return Err(GithubError::HttpStatus { status });
     }
-    serde_json::from_str(body).map_err(|_| GithubError::InvalidJson)
+    serde_json::from_str(body).map_err(|error| {
+        if error.is_data() {
+            GithubError::InvalidResponse
+        } else {
+            GithubError::InvalidJson
+        }
+    })
 }
 
 fn percent_encode_path(value: &str) -> String {
@@ -69,7 +81,7 @@ fn percent_encode_path(value: &str) -> String {
 
 fn github_issues_page_url(repository: &RepositoryRef, page: u32) -> String {
     format!(
-        "{GITHUB_ISSUES_URL}/{}/{}?state=open&sort=created&direction=desc&per_page={GITHUB_PAGE_SIZE}&page={page}",
+        "{GITHUB_ISSUES_URL}/{}/{}/issues?state=open&sort=created&direction=desc&per_page={GITHUB_PAGE_SIZE}&page={page}",
         percent_encode_path(&repository.owner),
         percent_encode_path(&repository.repo)
     )
@@ -137,8 +149,26 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].body, None);
-        assert!(parse_github_issues_page(403, "[]").is_err());
-        assert!(parse_github_issues_page(200, "not-json").is_err());
+        assert!(matches!(
+            parse_github_issues_page(403, "[]"),
+            Err(GithubError::HttpStatus { status: 403 })
+        ));
+        assert!(matches!(
+            parse_github_issues_page(200, "not-json"),
+            Err(GithubError::InvalidJson)
+        ));
+        assert!(matches!(
+            parse_github_issues_page(200, "{}"),
+            Err(GithubError::InvalidResponse)
+        ));
+    }
+
+    #[test]
+    fn explains_missing_repository_or_token_access_for_not_found() {
+        let message = GithubError::HttpStatus { status: 404 }.to_string();
+        assert!(message.contains("repository was not found"));
+        assert!(message.contains("saved token has no access"));
+        assert!(message.contains("run login again"));
     }
 
     #[test]
@@ -197,6 +227,9 @@ mod tests {
             },
             2,
         );
-        assert!(url.contains("state=open&sort=created&direction=desc&per_page=100&page=2"));
+        assert_eq!(
+            url,
+            "https://api.github.com/repos/octo-org/widgets/issues?state=open&sort=created&direction=desc&per_page=100&page=2"
+        );
     }
 }

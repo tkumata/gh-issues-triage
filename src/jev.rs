@@ -10,6 +10,9 @@ const TYPESAFE_URL: &str = "https://api.typesafe.ai/v1/systemone";
 const TYPESAFE_MODEL: &str = "jev-latest";
 const JEV_MAX_ATTEMPTS: u32 = 3;
 const JEV_INITIAL_BACKOFF: Duration = Duration::from_millis(100);
+// TypeSafe rounds each probability and score to two decimals.
+const ANSWER_ROUNDING_ERROR: f64 = 0.005;
+const FLOATING_POINT_MARGIN: f64 = 1e-9;
 #[derive(Debug)]
 pub(crate) enum JevError {
     MissingApiKey,
@@ -103,7 +106,15 @@ fn validate_score_answer(answer: &Value) -> Result<f64, JevError> {
         sum += probability;
         weighted_score += probability * index as f64;
     }
-    if (sum - 1.0).abs() > 1e-6 || (weighted_score - score).abs() > 1e-6 {
+    let criteria_count = SCORE_CRITERIA.len() as f64;
+    let probability_sum_tolerance = criteria_count * ANSWER_ROUNDING_ERROR + FLOATING_POINT_MARGIN;
+    if (sum - 1.0).abs() > probability_sum_tolerance {
+        return Err(JevError::InvalidResponse);
+    }
+    let weighted_score_tolerance = ANSWER_ROUNDING_ERROR
+        + criteria_count * (criteria_count - 1.0) / 2.0 * ANSWER_ROUNDING_ERROR
+        + FLOATING_POINT_MARGIN;
+    if (weighted_score - score).abs() > weighted_score_tolerance {
         return Err(JevError::InvalidResponse);
     }
     Ok(score)
@@ -240,6 +251,10 @@ mod tests {
         let mut wrong_probabilities = valid_answer(2.0);
         wrong_probabilities["probabilities"]["3"] = json!(0.9);
         assert!(validate_score_answer(&wrong_probabilities).is_err());
+        let mut rounded_answer = valid_answer(1.0);
+        rounded_answer["probabilities"] =
+            json!({ "0": 0.33, "1": 0.33, "2": 0.33, "3": 0.0, "4": 0.0 });
+        assert_eq!(validate_score_answer(&rounded_answer).unwrap(), 1.0);
         let mut wrong_weighted_score = valid_answer(2.0);
         wrong_weighted_score["score"] = json!(3.0);
         assert!(validate_score_answer(&wrong_weighted_score).is_err());

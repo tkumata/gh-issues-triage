@@ -7,6 +7,8 @@ GitHub Issues の最新10件を取得し、Jev で重要度順に並べる CLI �
 - GitHub App
 - Device Flow
 
+private repository を使う場合は、GitHub App を対象 repository に install し、App の `Issues: Read` 権限を設定してください。権限や対象 repository を変更した後は `cargo run -- login` を再実行します。
+
 ## Environment
 
 - Rust
