@@ -99,3 +99,15 @@ gh-issues-triage <owner>/<repo>
 - サービスは GitHub.com に限定する。
 - OS は macOS と Linux に対応する。
 - GitHub App とユーザーの権限でアクセスできる public/private repository を対象とする。
+
+## 追加仕様: ブランチ作成
+
+- 既存の重要度 `Score` 判定に加え、同じ Issue の `number`、`title`、`body` を参照する独立した Jev `Choice` question で `refactor` / `fix` / `feat` / `chore` / `docs` の一つを選ぶ。既存の最大10件・重要度順は維持する。
+- `Choice` の回答は質問数、型、選択肢を検証する。不完全・不正な回答に既定の prefix を当てず、トリアージを失敗させる。
+- Issue 番号を十進数で表し、`<prefix>/issue-<number>` をブランチ名とする。Issue タイトルの翻訳・要約や追加の生成 API は使用しない。
+- `gh-issues-triage config set-root <directory>` で既存の絶対パスを root として保存する。設定先は `XDG_CONFIG_HOME/gh-issues-triage/config.json`、未設定時は `~/.config/gh-issues-triage/config.json` とする。設定値は公開パスであり token や API key は保存しない。
+- CLI 引数 `<owner>/<repo>` の `repo` をローカルディレクトリ名とし、`root/repo` を対象にする。root 未設定・候補パス不在の場合はブランチ作成を拒否する。候補パスが指定されたリポジトリに対応するかを検証してから Git 操作を行う。
+- ブランチの起点は対象ローカルリポジトリの `main`。`main` がない場合、別の ref を代用しない。同名ブランチがある場合、上書きしない。
+- 各 Issue の本文の下にブランチ名とマウスでクリックできる作成ボタンを表示する。クリック後にブランチを作成する。端末はクリックを受け取る間、対話状態を維持する。キーボードでも同じ操作を選べるようにする。
+- 作成後はブランチを切り替えず、CLI の作業ディレクトリも変更しない。対象リポジトリを明示して Git 操作を実行する。クリック前にブランチを作成しない。
+- ディレクトリ・Git・Jev のエラーは理由を表示し、成功表示しない。`repo` をシェル文字列へ直接埋め込まない。
