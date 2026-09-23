@@ -33,7 +33,7 @@ impl fmt::Debug for TokenSet {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DeviceCode {
-    device_code: String,
+    code: String,
     pub(crate) user_code: String,
     pub(crate) verification_uri: String,
     expires_in: Duration,
@@ -77,7 +77,7 @@ pub(crate) enum AuthFailure {
     Unknown,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum AuthError {
     MissingClientId,
     HttpRequest { timeout: bool },
@@ -141,7 +141,7 @@ fn parse_device_code(body: &str) -> Result<DeviceCode, AuthError> {
         return Err(AuthError::InvalidResponse);
     }
     Ok(DeviceCode {
-        device_code: response.device_code,
+        code: response.device_code,
         user_code: response.user_code,
         verification_uri: response.verification_uri,
         expires_in: Duration::from_secs(response.expires_in),
@@ -239,7 +239,7 @@ pub(crate) fn poll_access_token(
             .post(ACCESS_TOKEN_URL)
             .query(&[
                 ("client_id", client_id),
-                ("device_code", device.device_code.as_str()),
+                ("device_code", device.code.as_str()),
                 ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
             ])
             .header(ACCEPT, "application/json")
@@ -294,9 +294,10 @@ fn parse_refresh_response(status: u16, body: &str) -> Result<TokenSet, AuthError
         {
             Ok(tokens)
         }
-        PollDecision::Success(_) => Err(AuthError::InvalidResponse),
+        PollDecision::Success(_) | PollDecision::Pending | PollDecision::SlowDown(_) => {
+            Err(AuthError::InvalidResponse)
+        }
         PollDecision::Failure(failure) => Err(AuthError::Failure(failure)),
-        PollDecision::Pending | PollDecision::SlowDown(_) => Err(AuthError::InvalidResponse),
     }
 }
 
@@ -306,20 +307,29 @@ mod tests {
 
     #[test]
     fn parses_device_code_response() {
-        let response = parse_device_code(r#"{"device_code":"device-secret","user_code":"ABCD-EFGH","verification_uri":"https://github.com/login/device","expires_in":900,"interval":5}"#).unwrap();
-        assert_eq!(response.interval, Duration::from_secs(5));
-        assert_eq!(response.expires_in, Duration::from_secs(900));
+        assert_eq!(
+            parse_device_code(
+                r#"{"device_code":"device-secret","user_code":"ABCD-EFGH","verification_uri":"https://github.com/login/device","expires_in":900,"interval":5}"#
+            ),
+            Ok(DeviceCode {
+                code: "device-secret".to_owned(),
+                user_code: "ABCD-EFGH".to_owned(),
+                verification_uri: "https://github.com/login/device".to_owned(),
+                expires_in: Duration::from_mins(15),
+                interval: Duration::from_secs(5),
+            })
+        );
     }
 
     #[test]
     fn parses_token_state_transitions_without_storing_secrets() {
         assert_eq!(
-            parse_token_response(200, r#"{"error":"authorization_pending"}"#).unwrap(),
-            PollDecision::Pending
+            parse_token_response(200, r#"{"error":"authorization_pending"}"#),
+            Ok(PollDecision::Pending)
         );
         assert_eq!(
-            parse_token_response(200, r#"{"error":"slow_down","interval":20}"#).unwrap(),
-            PollDecision::SlowDown(Some(Duration::from_secs(20)))
+            parse_token_response(200, r#"{"error":"slow_down","interval":20}"#),
+            Ok(PollDecision::SlowDown(Some(Duration::from_secs(20))))
         );
     }
 
@@ -329,12 +339,11 @@ mod tests {
             parse_token_response(
                 200,
                 r#"{"access_token":"token-secret","token_type":"bearer"}"#
-            )
-            .unwrap(),
-            PollDecision::Success(TokenSet {
+            ),
+            Ok(PollDecision::Success(TokenSet {
                 access_token: "token-secret".to_owned(),
                 refresh_token: None,
-            })
+            }))
         );
         assert!(matches!(
             parse_token_response(500, r#"{"error":"device_flow_disabled"}"#),
@@ -352,12 +361,11 @@ mod tests {
             parse_refresh_response(
                 200,
                 r#"{"access_token":"new-access","refresh_token":"new-refresh"}"#
-            )
-            .unwrap(),
-            TokenSet {
+            ),
+            Ok(TokenSet {
                 access_token: "new-access".to_owned(),
                 refresh_token: Some("new-refresh".to_owned()),
-            }
+            })
         );
         for body in [
             r#"{"access_token":"new-access"}"#,
@@ -401,13 +409,13 @@ mod tests {
             ("bad_refresh_token", AuthFailure::BadRefreshToken),
         ] {
             assert_eq!(
-                parse_token_response(200, &format!(r#"{{"error":"{code}"}}"#)).unwrap(),
-                PollDecision::Failure(expected)
+                parse_token_response(200, &format!(r#"{{"error":"{code}"}}"#)),
+                Ok(PollDecision::Failure(expected))
             );
         }
         assert_eq!(
-            parse_token_response(200, r#"{"error":"external-secret-description"}"#).unwrap(),
-            PollDecision::Failure(AuthFailure::Unknown)
+            parse_token_response(200, r#"{"error":"external-secret-description"}"#),
+            Ok(PollDecision::Failure(AuthFailure::Unknown))
         );
     }
 

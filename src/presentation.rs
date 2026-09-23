@@ -168,14 +168,16 @@ mod tests {
     fn wraps_unicode_newlines_and_renders_empty_table() {
         let issue = issue(42, "タイトル🙂", "本文\n長い日本語");
         for width in [26, 40, 60] {
-            let output = render_table(std::slice::from_ref(&issue), width).unwrap();
-            assert!(output.lines().all(|line| line.width() == width));
+            assert!(matches!(
+                render_table(std::slice::from_ref(&issue), width),
+                Ok(output) if output.lines().all(|line| line.width() == width)
+            ));
         }
-        let output = render_table(std::slice::from_ref(&issue), 40).unwrap();
-        assert!(output.contains("タイトル"));
-        assert!(output.contains("本文"));
-        let empty = render_table(&[], 40).unwrap();
-        assert_eq!(empty.lines().count(), 3);
+        assert!(matches!(
+            render_table(std::slice::from_ref(&issue), 40),
+            Ok(output) if output.contains("タイトル") && output.contains("本文")
+        ));
+        assert!(matches!(render_table(&[], 40), Ok(output) if output.lines().count() == 3));
         assert!(render_table(&[], 10).is_err());
     }
 }

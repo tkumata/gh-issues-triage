@@ -97,22 +97,21 @@ fn device_authorize(client: &Client) -> Result<credentials::Credentials, AppErro
     Ok(credentials)
 }
 
-fn run_repository(repository: RepositoryRef) -> Result<(), AppError> {
+fn run_repository(repository: &RepositoryRef) -> Result<(), AppError> {
     let client = http_client()?;
     let stored = match credentials::load_credentials() {
         Ok(credentials) => Some(credentials),
         Err(CredentialError::NotLoggedIn) => None,
         Err(error) => return Err(AppError::Credential(error)),
     };
-    let stored = match stored {
-        Some(credentials) => credentials,
-        None => {
-            let credentials = device_authorize(&client)?;
-            credentials::save_credentials(&credentials)?;
-            credentials
-        }
+    let stored = if let Some(credentials) = stored {
+        credentials
+    } else {
+        let credentials = device_authorize(&client)?;
+        credentials::save_credentials(&credentials)?;
+        credentials
     };
-    let issues = match fetch_issues(&client, &stored.access_token, &repository) {
+    let issues = match fetch_issues(&client, &stored.access_token, repository) {
         Ok(issues) => issues,
         Err(GithubError::HttpStatus { status: 401 }) => {
             let refreshed = if let Some(refresh_token) = stored.refresh_token.as_deref() {
@@ -131,7 +130,7 @@ fn run_repository(repository: RepositoryRef) -> Result<(), AppError> {
                 device_authorize(&client)?
             };
             credentials::save_credentials(&refreshed)?;
-            fetch_issues(&client, &refreshed.access_token, &repository)?
+            fetch_issues(&client, &refreshed.access_token, repository)?
         }
         Err(error) => return Err(error.into()),
     };
@@ -154,7 +153,7 @@ fn main() {
         }
     };
     let result = match command {
-        Command::Repository(repository) => run_repository(repository),
+        Command::Repository(repository) => run_repository(&repository),
     };
     if let Err(reason) = result {
         eprintln!("error: {reason}");
