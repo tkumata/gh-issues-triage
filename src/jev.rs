@@ -94,6 +94,8 @@ fn validate_score_answer(answer: &Value) -> Result<f64, JevError> {
     }
     let mut sum = 0.0;
     let mut weighted_score = 0.0;
+    let criteria_count =
+        f64::from(u32::try_from(SCORE_CRITERIA.len()).map_err(|_| JevError::InvalidResponse)?);
     for (index, criterion) in SCORE_CRITERIA.iter().enumerate() {
         let key = index.to_string();
         if legend.get(&key).and_then(Value::as_str) != Some(*criterion) {
@@ -104,9 +106,9 @@ fn validate_score_answer(answer: &Value) -> Result<f64, JevError> {
             return Err(JevError::InvalidResponse);
         }
         sum += probability;
-        weighted_score += probability * index as f64;
+        let score_value = f64::from(u32::try_from(index).map_err(|_| JevError::InvalidResponse)?);
+        weighted_score += probability * score_value;
     }
-    let criteria_count = SCORE_CRITERIA.len() as f64;
     let probability_sum_tolerance = criteria_count * ANSWER_ROUNDING_ERROR + FLOATING_POINT_MARGIN;
     if (sum - 1.0).abs() > probability_sum_tolerance {
         return Err(JevError::InvalidResponse);
@@ -189,74 +191,129 @@ mod tests {
 
     fn valid_answer(score: f64) -> Value {
         let bounded_score = score.clamp(0.0, 4.0);
-        let lower = bounded_score.floor() as usize;
-        let upper = bounded_score.ceil() as usize;
-        let mut probabilities = [0.0; 5];
-        if lower == upper {
-            probabilities[lower] = 1.0;
-        } else {
-            probabilities[lower] = upper as f64 - bounded_score;
-            probabilities[upper] = bounded_score - lower as f64;
-        }
-        json!({ "type": "score", "score": score, "confidence": 0.8, "legend": { "0": SCORE_CRITERIA[0], "1": SCORE_CRITERIA[1], "2": SCORE_CRITERIA[2], "3": SCORE_CRITERIA[3], "4": SCORE_CRITERIA[4] }, "probabilities": { "0": probabilities[0], "1": probabilities[1], "2": probabilities[2], "3": probabilities[3], "4": probabilities[4] } })
+        let probabilities = [0.0, 1.0, 2.0, 3.0, 4.0]
+            .into_iter()
+            .map(|criterion_score| (1.0 - (bounded_score - criterion_score).abs()).max(0.0))
+            .enumerate()
+            .map(|(index, probability)| (index.to_string(), probability))
+            .collect::<BTreeMap<_, _>>();
+        let legend = SCORE_CRITERIA
+            .iter()
+            .enumerate()
+            .map(|(index, criterion)| (index.to_string(), criterion))
+            .collect::<BTreeMap<_, _>>();
+        json!({ "type": "score", "score": score, "confidence": 0.8, "legend": legend, "probabilities": probabilities })
     }
 
     #[test]
     fn builds_one_score_question_per_issue() {
         let request =
             build_jev_request(&[issue(42, "broken", "details", 0), issue(7, "old", "", 1)]);
-        assert_eq!(request["model"], TYPESAFE_MODEL);
-        assert_eq!(request["questions"].as_object().unwrap().len(), 2);
-        assert_eq!(request["questions"]["issue_0"]["type"], "score");
         assert_eq!(
-            request["questions"]["issue_0"]["criteria"]
-                .as_array()
-                .unwrap()
-                .len(),
-            5
+            request.get("model").and_then(Value::as_str),
+            Some(TYPESAFE_MODEL)
+        );
+        let questions = request.get("questions").and_then(Value::as_object);
+        assert_eq!(questions.map(serde_json::Map::len), Some(2));
+        let first_question = questions.and_then(|items| items.get("issue_0"));
+        assert_eq!(
+            first_question
+                .and_then(|item| item.get("type"))
+                .and_then(Value::as_str),
+            Some("score")
+        );
+        assert_eq!(
+            first_question
+                .and_then(|item| item.get("criteria"))
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(5)
         );
         assert!(
-            request["questions"]["issue_0"]["instructions"]
-                .as_str()
-                .unwrap()
-                .contains("issues[0].number")
+            first_question
+                .and_then(|item| item.get("instructions"))
+                .and_then(Value::as_str)
+                .is_some_and(|text| text.contains("issues[0].number"))
         );
-        assert_eq!(request["state"]["issues"][0]["number"], 42);
+        assert_eq!(
+            request
+                .get("state")
+                .and_then(|state| state.get("issues"))
+                .and_then(Value::as_array)
+                .and_then(|issues| issues.first())
+                .and_then(|issue| issue.get("number"))
+                .and_then(Value::as_u64),
+            Some(42)
+        );
     }
 
     #[test]
     fn empty_triage_succeeds_without_an_api_key() {
-        assert!(
-            triage_issues(&Client::new(), "", Vec::new())
-                .unwrap()
-                .is_empty()
-        );
+        assert!(matches!(
+            triage_issues(&Client::new(), "", Vec::new()),
+            Ok(issues) if issues.is_empty()
+        ));
     }
 
     #[test]
     fn validates_score_edges_and_rejects_bad_answers() {
         for score in [0.0, 4.0] {
-            assert_eq!(validate_score_answer(&valid_answer(score)).unwrap(), score);
+            assert!(matches!(
+                validate_score_answer(&valid_answer(score)),
+                Ok(actual) if actual.to_bits() == score.to_bits()
+            ));
         }
         for answer in [json!({"type":"choice"}), valid_answer(4.1), {
             let mut value = valid_answer(2.0);
-            value["confidence"] = json!(1.1);
+            let changed = value.get_mut("confidence").is_some_and(|confidence| {
+                *confidence = json!(1.1);
+                true
+            });
+            assert!(changed);
             value
         }] {
             assert!(validate_score_answer(&answer).is_err());
         }
         let mut wrong_legend = valid_answer(2.0);
-        wrong_legend["legend"]["2"] = json!("different");
+        let changed = wrong_legend
+            .get_mut("legend")
+            .and_then(Value::as_object_mut)
+            .and_then(|legend| legend.get_mut("2"))
+            .is_some_and(|criterion| {
+                *criterion = json!("different");
+                true
+            });
+        assert!(changed);
         assert!(validate_score_answer(&wrong_legend).is_err());
         let mut wrong_probabilities = valid_answer(2.0);
-        wrong_probabilities["probabilities"]["3"] = json!(0.9);
+        let changed = wrong_probabilities
+            .get_mut("probabilities")
+            .and_then(Value::as_object_mut)
+            .and_then(|probabilities| probabilities.get_mut("3"))
+            .is_some_and(|probability| {
+                *probability = json!(0.9);
+                true
+            });
+        assert!(changed);
         assert!(validate_score_answer(&wrong_probabilities).is_err());
         let mut rounded_answer = valid_answer(1.0);
-        rounded_answer["probabilities"] =
-            json!({ "0": 0.33, "1": 0.33, "2": 0.33, "3": 0.0, "4": 0.0 });
-        assert_eq!(validate_score_answer(&rounded_answer).unwrap(), 1.0);
+        let changed = rounded_answer
+            .get_mut("probabilities")
+            .is_some_and(|probabilities| {
+                *probabilities = json!({ "0": 0.33, "1": 0.33, "2": 0.33, "3": 0.0, "4": 0.0 });
+                true
+            });
+        assert!(changed);
+        assert!(matches!(
+            validate_score_answer(&rounded_answer),
+            Ok(actual) if actual.to_bits() == 1.0_f64.to_bits()
+        ));
         let mut wrong_weighted_score = valid_answer(2.0);
-        wrong_weighted_score["score"] = json!(3.0);
+        let changed = wrong_weighted_score.get_mut("score").is_some_and(|score| {
+            *score = json!(3.0);
+            true
+        });
+        assert!(changed);
         assert!(validate_score_answer(&wrong_weighted_score).is_err());
     }
 

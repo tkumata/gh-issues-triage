@@ -77,7 +77,7 @@ pub(crate) fn load_credentials() -> Result<Credentials, CredentialError> {
     match entry()?.get_password() {
         Ok(value) if !value.is_empty() => parse_credentials(&value),
         Ok(_) => Err(CredentialError::CredentialReadFailed),
-        Err(error) => Err(classify_credential_read_error(error)),
+        Err(error) => Err(classify_credential_read_error(&error)),
     }
 }
 
@@ -102,7 +102,7 @@ fn parse_credentials(value: &str) -> Result<Credentials, CredentialError> {
     })
 }
 
-fn classify_credential_read_error(error: keyring::Error) -> CredentialError {
+fn classify_credential_read_error(error: &keyring::Error) -> CredentialError {
     match error {
         keyring::Error::NoEntry => CredentialError::NotLoggedIn,
         _ => CredentialError::CredentialReadFailed,
@@ -116,11 +116,11 @@ mod tests {
     #[test]
     fn classifies_missing_and_unreadable_credentials() {
         assert!(matches!(
-            classify_credential_read_error(keyring::Error::NoEntry),
+            classify_credential_read_error(&keyring::Error::NoEntry),
             CredentialError::NotLoggedIn
         ));
         assert!(matches!(
-            classify_credential_read_error(keyring::Error::Invalid(
+            classify_credential_read_error(&keyring::Error::Invalid(
                 "entry".to_owned(),
                 "invalid".to_owned()
             )),
@@ -130,15 +130,16 @@ mod tests {
 
     #[test]
     fn reads_both_credential_formats_without_exposing_tokens() {
-        let old = parse_credentials("gho_legacy").unwrap();
-        assert_eq!(old.access_token, "gho_legacy");
-        assert_eq!(old.refresh_token, None);
+        assert!(matches!(
+            parse_credentials("gho_legacy"),
+            Ok(Credentials { access_token, refresh_token: None }) if access_token == "gho_legacy"
+        ));
 
-        let current =
-            parse_credentials(r#"{"access_token":"gho_access","refresh_token":"ghr_refresh"}"#)
-                .unwrap();
-        assert_eq!(current.access_token, "gho_access");
-        assert_eq!(current.refresh_token.as_deref(), Some("ghr_refresh"));
+        assert!(matches!(
+            parse_credentials(r#"{"access_token":"gho_access","refresh_token":"ghr_refresh"}"#),
+            Ok(Credentials { access_token, refresh_token: Some(refresh_token) })
+                if access_token == "gho_access" && refresh_token == "ghr_refresh"
+        ));
     }
 
     #[test]

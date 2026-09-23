@@ -142,13 +142,21 @@ mod tests {
 
     #[test]
     fn parses_github_pages_and_excludes_pull_requests() {
-        let first = parse_github_issues_page(200, r#"[{"number":1,"title":"issue","body":null},{"number":2,"title":"pr","body":"x","pull_request":{"url":"x"}}]"#).unwrap();
-        let issues = first
-            .into_iter()
-            .filter(|item| item.pull_request.is_none())
-            .collect::<Vec<_>>();
-        assert_eq!(issues.len(), 1);
-        assert_eq!(issues[0].body, None);
+        assert!(parse_github_issues_page(
+            200,
+            r#"[{"number":1,"title":"issue","body":null},{"number":2,"title":"pr","body":"x","pull_request":{"url":"x"}}]"#
+        )
+        .is_ok_and(|items| {
+            items.len() == 2
+                && items
+                    .iter()
+                    .filter(|item| item.pull_request.is_none())
+                    .count()
+                    == 1
+                && items.first().is_some_and(|issue| {
+                    issue.number == 1 && issue.title == "issue" && issue.body.is_none()
+                })
+        }));
         assert!(matches!(
             parse_github_issues_page(403, "[]"),
             Err(GithubError::HttpStatus { status: 403 })
@@ -200,9 +208,13 @@ mod tests {
                 pull_request: None,
             }],
         );
-        assert_eq!(issues.len(), 2);
-        assert_eq!(issues[0].source_order, 0);
-        assert_eq!(issues[1].source_order, 1);
+        assert_eq!(
+            issues
+                .iter()
+                .map(|issue| issue.source_order)
+                .collect::<Vec<_>>(),
+            [0, 1]
+        );
         let ten = (0..12)
             .map(|number| GithubIssueResponse {
                 number,
