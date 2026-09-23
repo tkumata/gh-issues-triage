@@ -26,13 +26,18 @@ pub(crate) struct Issue {
 pub(crate) struct RankedIssue {
     pub(crate) issue: Issue,
     pub(crate) score: f64,
+    pub(crate) prefix: String,
 }
 
-pub(crate) fn rank_issues(issues: Vec<Issue>, scores: Vec<f64>) -> Vec<RankedIssue> {
+pub(crate) fn rank_issues(issues: Vec<Issue>, scores: Vec<(f64, String)>) -> Vec<RankedIssue> {
     let mut ranked = issues
         .into_iter()
         .zip(scores)
-        .map(|(issue, score)| RankedIssue { issue, score })
+        .map(|(issue, (score, prefix))| RankedIssue {
+            issue,
+            score,
+            prefix,
+        })
         .collect::<Vec<_>>();
     ranked.sort_by(|left, right| {
         right
@@ -71,7 +76,11 @@ mod tests {
                     source_order: 2,
                 },
             ],
-            vec![2.0, 4.0, 2.0],
+            vec![
+                (2.0, "fix".to_owned()),
+                (4.0, "feat".to_owned()),
+                (2.0, "docs".to_owned()),
+            ],
         );
         assert_eq!(
             ranked

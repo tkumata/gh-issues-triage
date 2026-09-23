@@ -13,6 +13,16 @@ const JEV_INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 // TypeSafe rounds each probability and score to two decimals.
 const ANSWER_ROUNDING_ERROR: f64 = 0.005;
 const FLOATING_POINT_MARGIN: f64 = 1e-9;
+const BRANCH_CRITERIA: [(&str, &str); 5] = [
+    (
+        "refactor",
+        "internal improvement without a user-facing behavior change",
+    ),
+    ("fix", "fix an existing defect"),
+    ("feat", "add or extend user-facing functionality"),
+    ("chore", "maintenance, dependencies, or development tooling"),
+    ("docs", "documentation only"),
+];
 #[derive(Debug)]
 pub(crate) enum JevError {
     MissingApiKey,
@@ -47,11 +57,28 @@ pub(crate) fn typesafe_api_key() -> Result<String, JevError> {
 
 pub(crate) fn build_jev_request(issues: &[Issue]) -> Value {
     let state = json!({ "issues": issues.iter().map(|issue| json!({ "number": issue.number, "title": issue.title, "body": issue.body })).collect::<Vec<_>>() });
-    let questions = issues.iter().enumerate().map(|(index, _)| {
+    let mut questions = BTreeMap::new();
+    for (index, _) in issues.iter().enumerate() {
         let id = format!("issue_{index}");
-        let instructions = format!("Judge the importance of the issue at `issues[{index}].number`, `issues[{index}].title`, and `issues[{index}].body` in the state. Use those fields to determine the issue's importance.");
-        (id, json!({ "type": "score", "instructions": instructions, "criteria": SCORE_CRITERIA }))
-    }).collect::<BTreeMap<_, _>>();
+        let instructions = format!(
+            "Judge the importance of the issue at `issues[{index}].number`, `issues[{index}].title`, and `issues[{index}].body` in the state. Use those fields to determine the issue's importance."
+        );
+        let choice_instructions = format!(
+            "Classify the issue at `issues[{index}].number`, `issues[{index}].title`, and `issues[{index}].body` for its likely change type."
+        );
+        let criteria = BRANCH_CRITERIA
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect::<BTreeMap<_, _>>();
+        questions.insert(
+            id,
+            json!({ "type": "score", "instructions": instructions, "criteria": SCORE_CRITERIA }),
+        );
+        questions.insert(
+            format!("issue_{index}_branch"),
+            json!({ "type": "choice", "instructions": choice_instructions, "criteria": criteria }),
+        );
+    }
     json!({"model": TYPESAFE_MODEL, "state": state, "questions": questions})
 }
 
@@ -122,20 +149,67 @@ fn validate_score_answer(answer: &Value) -> Result<f64, JevError> {
     Ok(score)
 }
 
-fn parse_jev_answers(body: &str, issue_count: usize) -> Result<Vec<f64>, JevError> {
+fn validate_choice_answer(answer: &Value) -> Result<String, JevError> {
+    let object = answer.as_object().ok_or(JevError::InvalidResponse)?;
+    if object.get("type").and_then(Value::as_str) != Some("choice") {
+        return Err(JevError::InvalidResponse);
+    }
+    let choice = object
+        .get("choice")
+        .and_then(Value::as_str)
+        .ok_or(JevError::InvalidResponse)?;
+    if !BRANCH_CRITERIA.iter().any(|(key, _)| *key == choice) {
+        return Err(JevError::InvalidResponse);
+    }
+    let confidence = number(object.get("confidence")).ok_or(JevError::InvalidResponse)?;
+    if !(0.0..=1.0).contains(&confidence) {
+        return Err(JevError::InvalidResponse);
+    }
+    let probabilities = object
+        .get("probabilities")
+        .and_then(Value::as_object)
+        .ok_or(JevError::InvalidResponse)?;
+    if probabilities.len() != BRANCH_CRITERIA.len() {
+        return Err(JevError::InvalidResponse);
+    }
+    let chosen_probability = number(probabilities.get(choice)).ok_or(JevError::InvalidResponse)?;
+    let mut sum = 0.0;
+    for (key, _) in BRANCH_CRITERIA {
+        let probability = number(probabilities.get(key)).ok_or(JevError::InvalidResponse)?;
+        if !(0.0..=1.0).contains(&probability) || probability > chosen_probability {
+            return Err(JevError::InvalidResponse);
+        }
+        sum += probability;
+    }
+    if (sum - 1.0).abs()
+        > f64::from(u32::try_from(BRANCH_CRITERIA.len()).map_err(|_| JevError::InvalidResponse)?)
+            * ANSWER_ROUNDING_ERROR
+            + FLOATING_POINT_MARGIN
+    {
+        return Err(JevError::InvalidResponse);
+    }
+    Ok(choice.to_owned())
+}
+
+fn parse_jev_answers(body: &str, issue_count: usize) -> Result<Vec<(f64, String)>, JevError> {
     let response: Value = serde_json::from_str(body).map_err(|_| JevError::InvalidJson)?;
     let answers = response
         .get("answers")
         .and_then(Value::as_object)
         .ok_or(JevError::InvalidResponse)?;
-    if answers.len() != issue_count {
+    if answers.len() != issue_count * 2 {
         return Err(JevError::InvalidResponse);
     }
     (0..issue_count)
         .map(|index| {
             let id = format!("issue_{index}");
-            validate_score_answer(answers.get(&id).ok_or(JevError::InvalidResponse)?)
-                .map_err(|_| JevError::InvalidResponse)
+            let score = validate_score_answer(answers.get(&id).ok_or(JevError::InvalidResponse)?)?;
+            let prefix = validate_choice_answer(
+                answers
+                    .get(&format!("{id}_branch"))
+                    .ok_or(JevError::InvalidResponse)?,
+            )?;
+            Ok((score, prefix))
         })
         .collect()
 }
@@ -205,6 +279,56 @@ mod tests {
         json!({ "type": "score", "score": score, "confidence": 0.8, "legend": legend, "probabilities": probabilities })
     }
 
+    fn valid_choice(choice: &str) -> Value {
+        let probabilities = BRANCH_CRITERIA
+            .iter()
+            .map(|(key, _)| {
+                (
+                    (*key).to_owned(),
+                    json!(f64::from(u8::from(*key == choice))),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        json!({"type":"choice", "choice":choice, "confidence":0.8, "probabilities":probabilities})
+    }
+
+    #[test]
+    fn accepts_each_prefix_and_rejects_invalid_choice_answers() {
+        for (prefix, _) in BRANCH_CRITERIA {
+            assert!(
+                validate_choice_answer(&valid_choice(prefix)).is_ok_and(|actual| actual == prefix)
+            );
+        }
+        for answer in [
+            json!({"type":"score", "choice":"fix", "confidence":0.8, "probabilities":{}}),
+            json!({"type":"choice", "choice":"unknown", "confidence":0.8, "probabilities":{}}),
+            json!({"type":"choice", "choice":"fix", "confidence":1.1, "probabilities":{}}),
+            json!({"type":"choice", "choice":"fix", "confidence":0.8, "probabilities":{"refactor":0.0,"fix":0.9,"feat":0.0,"chore":0.0,"docs":0.0}}),
+        ] {
+            assert!(validate_choice_answer(&answer).is_err());
+        }
+        let mut wrong_selected_option = valid_choice("docs");
+        let changed = wrong_selected_option
+            .get_mut("probabilities")
+            .and_then(Value::as_object_mut)
+            .and_then(|probabilities| probabilities.get_mut("fix"))
+            .is_some_and(|probability| {
+                *probability = json!(1.0);
+                true
+            });
+        assert!(changed);
+        let changed = wrong_selected_option
+            .get_mut("probabilities")
+            .and_then(Value::as_object_mut)
+            .and_then(|probabilities| probabilities.get_mut("docs"))
+            .is_some_and(|probability| {
+                *probability = json!(0.0);
+                true
+            });
+        assert!(changed);
+        assert!(validate_choice_answer(&wrong_selected_option).is_err());
+    }
+
     #[test]
     fn builds_one_score_question_per_issue() {
         let request =
@@ -214,7 +338,7 @@ mod tests {
             Some(TYPESAFE_MODEL)
         );
         let questions = request.get("questions").and_then(Value::as_object);
-        assert_eq!(questions.map(serde_json::Map::len), Some(2));
+        assert_eq!(questions.map(serde_json::Map::len), Some(4));
         let first_question = questions.and_then(|items| items.get("issue_0"));
         assert_eq!(
             first_question
@@ -244,6 +368,21 @@ mod tests {
                 .and_then(|issue| issue.get("number"))
                 .and_then(Value::as_u64),
             Some(42)
+        );
+        assert_eq!(
+            questions
+                .and_then(|items| items.get("issue_0_branch"))
+                .and_then(|item| item.get("type"))
+                .and_then(Value::as_str),
+            Some("choice")
+        );
+        assert_eq!(
+            questions
+                .and_then(|items| items.get("issue_0_branch"))
+                .and_then(|item| item.get("criteria"))
+                .and_then(Value::as_object)
+                .map(serde_json::Map::len),
+            Some(5)
         );
     }
 
@@ -321,10 +460,27 @@ mod tests {
     fn rejects_missing_extra_and_wrong_type_answers() {
         let mut answers = serde_json::Map::new();
         answers.insert("issue_0".to_owned(), valid_answer(2.0));
+        answers.insert("issue_0_branch".to_owned(), valid_choice("fix"));
         assert!(parse_jev_answers(&json!({"answers": answers}).to_string(), 2).is_err());
-        answers.insert("issue_1".to_owned(), json!({"type":"choice"}));
+        answers.insert("issue_1".to_owned(), valid_answer(1.0));
+        answers.insert("issue_1_branch".to_owned(), valid_choice("docs"));
+        answers.insert("issue_0_branch".to_owned(), json!({"type":"score"}));
+        assert!(parse_jev_answers(&json!({"answers": answers.clone()}).to_string(), 2).is_err());
         answers.insert("extra".to_owned(), valid_answer(1.0));
         assert!(parse_jev_answers(&json!({"answers": answers}).to_string(), 2).is_err());
+    }
+
+    #[test]
+    fn associates_all_five_choice_results_with_their_issues() {
+        let mut answers = serde_json::Map::new();
+        for (index, (prefix, _)) in BRANCH_CRITERIA.iter().enumerate() {
+            answers.insert(format!("issue_{index}"), valid_answer(2.0));
+            answers.insert(format!("issue_{index}_branch"), valid_choice(prefix));
+        }
+        let parsed = parse_jev_answers(&json!({"answers": answers}).to_string(), 5);
+        assert!(matches!(parsed, Ok(values)
+            if values.iter().map(|(_, prefix)| prefix.as_str()).collect::<Vec<_>>()
+                == BRANCH_CRITERIA.iter().map(|(prefix, _)| *prefix).collect::<Vec<_>>()));
     }
 
     #[test]
