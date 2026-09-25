@@ -81,7 +81,7 @@ cargo run -- config set-root /absolute/path/to/projects
 cargo run -- owner/repo
 ```
 
-`owner/repo` のローカル対象は `<root>/repo` です。Issue 本文下のボタンをクリックするか、`1`〜`9`・`0`（10件目）でブランチを作成します。`j`/`k` または上下矢印で表示をスクロールし、`q` で終了します。ブランチ名は `<prefix>/issue-<number>` で、対象リポジトリの `main` を起点にします。作成後の checkout、CLI の作業ディレクトリ変更、push は行いません。root は `XDG_CONFIG_HOME/gh-issues-triage/config.json`、未設定時は `~/.config/gh-issues-triage/config.json` に保存します。
+`owner/repo` のローカル対象は `<root>/repo` です。Issue 本文下のボタンをクリックするか、`1`〜`9`・`0`（10件目）でブランチを作成します。`j`/`k` または上下矢印で表示をスクロールし、`q` で終了します。ブランチ名は `<prefix>/issue-<number>` で、対象リポジトリの `main` を起点にします。作成時に対象リポジトリを新しいブランチへ切り替えます。CLI の作業ディレクトリ変更と push は行いません。root は `XDG_CONFIG_HOME/gh-issues-triage/config.json`、未設定時は `~/.config/gh-issues-triage/config.json` に保存します。
 
 GitHub または TypeSafe の応答、認証情報、端末幅の取得に失敗した場合は、途中結果を表示せず非ゼロで終了します。実 GitHub App、TypeSafe API、実端末での目視確認は別途必要です。
 
