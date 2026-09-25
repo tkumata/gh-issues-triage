@@ -128,7 +128,7 @@ fn create_branch_at(
     let name = branch_name(issue);
     git(&directory, &["check-ref-format", "--branch", &name])
         .map_err(|_| "generated branch name is invalid".to_owned())?;
-    git(&directory, &["branch", "--no-track", &name, "main"])
+    git(&directory, &["checkout", "--no-track", "-b", &name, "main"])
         .map_err(|error| format!("could not create branch: {error}"))?;
     Ok(name)
 }
@@ -163,7 +163,7 @@ mod tests {
     }
 
     #[test]
-    fn creates_from_main_without_changing_checkout_and_rejects_duplicate()
+    fn creates_from_main_checks_out_new_branch_and_rejects_duplicate_without_changes()
     -> Result<(), Box<dyn std::error::Error>> {
         let root = temp_dir()?;
         let repo = root.join("repo");
@@ -180,6 +180,9 @@ mod tests {
             &["remote", "add", "origin", "git@github.com:owner/repo.git"],
         )?;
         run(&repo, &["checkout", "-b", "work"])?;
+        fs::write(repo.join("file"), "work")?;
+        run(&repo, &["add", "file"])?;
+        run(&repo, &["commit", "-m", "work change"])?;
         let issue = RankedIssue {
             issue: crate::model::Issue {
                 number: 42,
@@ -199,20 +202,30 @@ mod tests {
             "branch name mismatch",
         )?;
         check(
-            run(&repo, &["branch", "--show-current"])? == "work",
-            "current branch changed",
+            run(&repo, &["branch", "--show-current"])? == "fix/issue-42",
+            "new branch was not checked out",
         )?;
         check(
             run(&repo, &["rev-parse", "fix/issue-42"])? == main_commit,
             "branch did not start at main",
         )?;
         check(
+            fs::read_to_string(repo.join("file"))? == "main",
+            "checked out branch does not contain main's file contents",
+        )?;
+        let branch_before_duplicate = run(&repo, &["branch", "--list"])?;
+        let checkout_before_duplicate = run(&repo, &["branch", "--show-current"])?;
+        check(
             create_branch_at(&root, &reference, &issue).is_err(),
             "duplicate branch was accepted",
         )?;
         check(
-            run(&repo, &["branch", "--show-current"])? == "work",
-            "duplicate attempt changed current branch",
+            run(&repo, &["branch", "--show-current"])? == checkout_before_duplicate,
+            "duplicate attempt changed checkout",
+        )?;
+        check(
+            run(&repo, &["branch", "--list"])? == branch_before_duplicate,
+            "duplicate attempt changed local branches",
         )?;
         fs::remove_dir_all(root)?;
         Ok(())
