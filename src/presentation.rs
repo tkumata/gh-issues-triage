@@ -149,7 +149,11 @@ pub(crate) fn render_table_with_buttons(
         return Err(DisplayError::TerminalWidthTooSmall { width });
     }
     let widths = [importance_width, number_width, width - fixed_width];
-    let mut lines = vec![horizontal_rule('┌', '┬', '┐', widths)];
+    let mut lines = wrap_line("重要度: 0（低）〜4（高）", width)
+        .into_iter()
+        .map(|line| pad_cell(&line, width))
+        .collect::<Vec<_>>();
+    lines.push(horizontal_rule('┌', '┬', '┐', widths));
     lines.push(table_row(["重要度", "番号", "Issues"], widths));
     if issues.is_empty() {
         lines.push(horizontal_rule('└', '┴', '┘', widths));
@@ -171,6 +175,7 @@ pub(crate) fn render_table_with_buttons(
         if !ranked.issue.body.is_empty() {
             content.extend(ranked.issue.body.split('\n').map(str::to_owned));
         }
+        content.push(String::new());
         content.push(format!("Branch: {}", crate::branch::branch_name(ranked)));
         let button_index = content.len();
         content.push(format!("[{}] Create branch", issue_index + 1));
@@ -242,7 +247,9 @@ mod tests {
             render_table(std::slice::from_ref(&issue), 40),
             Ok(output) if output.contains("タイトル") && output.contains("本文")
         ));
-        assert!(matches!(render_table(&[], 40), Ok(output) if output.lines().count() == 3));
+        assert!(matches!(render_table(&[], 40), Ok(output)
+            if output.lines().count() == 4
+                && output.lines().next().is_some_and(|line| line.trim() == "重要度: 0（低）〜4（高）")));
         assert!(render_table(&[], 10).is_err());
     }
 
@@ -256,6 +263,8 @@ mod tests {
                 && table.buttons.get(1).is_some_and(|button| button.issue_index == 1)
                 && table.text.lines().all(|line| line.width() == 40)
                 && table.buttons.first().is_some_and(|button| button.x_start == 19 && button.x_end - button.x_start + 1 == "[1] Create branch".width())
+                && table.buttons.first().and_then(|button| table.text.lines().nth(button.line - 1)).is_some_and(|line| line.contains("Branch:"))
+                && table.buttons.first().and_then(|button| table.text.lines().nth(button.line - 2)).is_some_and(|line| line.split('│').nth(3).is_some_and(|cell| cell.trim().is_empty()))
                 && table.buttons.first().and_then(|button| table.text.lines().nth(button.line)).is_some_and(|line| line.contains("[1]"))
                 && table.buttons.get(1).and_then(|button| table.text.lines().nth(button.line)).is_some_and(|line| line.contains("[2]"))));
     }
