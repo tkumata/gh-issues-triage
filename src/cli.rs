@@ -1,16 +1,28 @@
 use crate::model::RepositoryRef;
 
-pub(crate) const USAGE: &str =
-    "Usage: gh-issues-triage <owner>/<repo> | config set-root <absolute-directory>";
+pub(crate) const USAGE: &str = concat!(
+    "gh-issues-triage ",
+    env!("CARGO_PKG_VERSION"),
+    "\n\n使い方:\n",
+    "  gh-issues-triage <owner>/<repo>\n",
+    "  gh-issues-triage config set-root <absolute-directory>\n",
+    "  gh-issues-triage --help\n",
+    "\n引数:\n",
+    "  <owner>/<repo>                 GitHub アカウント / GitHub リポジトリ名\n",
+    "  config set-root <directory>    リポジトリの親ディレクトリ (初回に一度設定が必要)\n",
+    "  --help                         このヘルプを表示"
+);
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Command {
+    Help,
     Repository(RepositoryRef),
     SetRoot(std::path::PathBuf),
 }
 
 pub(crate) fn parse_args(args: &[String]) -> Result<Command, String> {
     match args {
+        [help] if help == "--help" => Ok(Command::Help),
         [] => Err("a command or repository is required".to_owned()),
         [value] => parse_repository(value),
         [config, set_root, directory] if config == "config" && set_root == "set-root" => {
@@ -66,6 +78,12 @@ mod tests {
                 repo: "widgets".to_owned()
             }))
         );
+    }
+
+    #[test]
+    fn accepts_help() {
+        assert_eq!(parse_args(&args(&["--help"])), Ok(Command::Help));
+        assert!(parse_args(&args(&["--help", "extra"])).is_err());
     }
 
     #[test]

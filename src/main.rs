@@ -457,6 +457,10 @@ fn main() {
         }
     };
     let result = match command {
+        Command::Help => {
+            println!("{USAGE}");
+            return;
+        }
         Command::Repository(repository) => run_repository(&repository),
         Command::SetRoot(root) => branch::set_root(&root).map_err(AppError::Interaction),
     };

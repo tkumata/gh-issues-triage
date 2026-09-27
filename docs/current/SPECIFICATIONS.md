@@ -8,9 +8,12 @@
 
 ```text
 gh-issues-triage <owner>/<repo>
+gh-issues-triage config set-root <absolute-directory>
+gh-issues-triage --help
 ```
 
-- 引数なし、未知のサブコマンド、または `<owner>/<repo>` として解釈できない値は usage を標準エラー出力へ表示し、非ゼロで終了する。
+- `--help` 単独では Cargo package version、使い方、各引数の説明を標準出力へ表示し、終了コード `0` とする。
+- 引数なし、未知のサブコマンド、または `<owner>/<repo>` として解釈できない値は usage を標準エラー出力へ表示し、終了コード `2` とする。
 - `owner` と `repo` は空文字を許可しない。余分なパス要素を許可しない。
 - 成功時は終了コード `0`、入力・認証・通信・応答・保存・表示の失敗時は非ゼロとする。
 
