@@ -233,21 +233,31 @@ impl Drop for TerminalMode {
 enum ActionInput {
     Key(u8),
     Mouse { x: usize, y: usize },
+    Hover { x: usize, y: usize },
     Up,
     Down,
+    PageUp,
+    PageDown,
     Continue,
     Quit,
 }
-const TERMINAL_RESTORE: &str = "\x1b[?1000l\x1b[?1006l\x1b[?1049l";
-const TERMINAL_ENTER: &str = "\x1b[?1049h\x1b[?1000h\x1b[?1006h";
+const TERMINAL_RESTORE: &str = "\x1b[?1003l\x1b[?1000l\x1b[?1006l\x1b[?1049l";
+const TERMINAL_ENTER: &str = "\x1b[?1049h\x1b[?1000h\x1b[?1003h\x1b[?1006h";
 
-fn parse_mouse_event(sequence: &str) -> Option<(usize, usize)> {
+fn parse_mouse_event(sequence: &str) -> Option<ActionInput> {
     let body = sequence.strip_prefix('<')?.strip_suffix('M')?;
     let mut fields = body.split(';');
-    if fields.next()?.parse::<u8>().ok()? != 0 {
+    let button = fields.next()?.parse::<u8>().ok()?;
+    let x = fields.next()?.parse().ok()?;
+    let y = fields.next()?.parse().ok()?;
+    if x == 0 || y == 0 || fields.next().is_some() {
         return None;
     }
-    Some((fields.next()?.parse().ok()?, fields.next()?.parse().ok()?))
+    match button {
+        0 => Some(ActionInput::Mouse { x, y }),
+        32..=35 => Some(ActionInput::Hover { x, y }),
+        _ => None,
+    }
 }
 
 fn action_for(
@@ -308,16 +318,84 @@ fn read_input(reader: &mut impl Read) -> io::Result<ActionInput> {
     if sequence == "B" {
         return Ok(ActionInput::Down);
     }
-    Ok(parse_mouse_event(sequence)
-        .map_or(ActionInput::Continue, |(x, y)| ActionInput::Mouse { x, y }))
+    if sequence == "5~" {
+        return Ok(ActionInput::PageUp);
+    }
+    if sequence == "6~" {
+        return Ok(ActionInput::PageDown);
+    }
+    Ok(parse_mouse_event(sequence).unwrap_or(ActionInput::Continue))
 }
 
-fn scroll_by(input: ActionInput, scroll: usize, max_scroll: usize) -> Option<usize> {
+fn hovered_issue(
+    table: &RenderedTable,
+    x: usize,
+    y: usize,
+    scroll: usize,
+    viewport_rows: usize,
+    width: usize,
+) -> Option<usize> {
+    if x == 0 || x > width || y == 0 || y > viewport_rows {
+        return None;
+    }
+    let line = scroll.checked_add(y - 1)?;
+    table
+        .issues
+        .iter()
+        .position(|issue| issue.lines.contains(&line))
+}
+
+fn first_visible_issue(
+    table: &RenderedTable,
+    scroll: usize,
+    viewport_rows: usize,
+) -> Option<usize> {
+    table.issues.iter().position(|issue| {
+        issue.lines.end > scroll && issue.lines.start < scroll.saturating_add(viewport_rows)
+    })
+}
+
+fn navigate_issue(
+    input: ActionInput,
+    table: &RenderedTable,
+    selected: Option<usize>,
+    scroll: usize,
+    viewport_rows: usize,
+) -> Option<(usize, usize)> {
+    let last = table.issues.len().checked_sub(1)?;
+    let next = match (input, selected) {
+        (ActionInput::Down | ActionInput::Key(b'j'), Some(index)) => {
+            index.saturating_add(1).min(last)
+        }
+        (ActionInput::Up | ActionInput::Key(b'k'), Some(index)) => index.saturating_sub(1),
+        (ActionInput::Up | ActionInput::Down | ActionInput::Key(b'j' | b'k'), None) => {
+            first_visible_issue(table, scroll, viewport_rows).unwrap_or(0)
+        }
+        _ => return None,
+    };
+    let issue = table.issues.get(next)?;
+    let next_scroll = if issue.lines.start < scroll || issue.lines.len() > viewport_rows {
+        issue.lines.start
+    } else {
+        scroll.max(issue.lines.end.saturating_sub(viewport_rows))
+    };
+    let max_scroll = table.text.lines().count().saturating_sub(viewport_rows);
+    Some((next, next_scroll.min(max_scroll)))
+}
+
+fn scroll_by(
+    input: ActionInput,
+    scroll: usize,
+    max_scroll: usize,
+    viewport_rows: usize,
+) -> Option<usize> {
     match input {
         ActionInput::Down | ActionInput::Key(b'j') => {
             Some(scroll.saturating_add(1).min(max_scroll))
         }
         ActionInput::Up | ActionInput::Key(b'k') => Some(scroll.saturating_sub(1)),
+        ActionInput::PageDown => Some(scroll.saturating_add(viewport_rows).min(max_scroll)),
+        ActionInput::PageUp => Some(scroll.saturating_sub(viewport_rows)),
         _ => None,
     }
 }
@@ -392,7 +470,7 @@ fn show_result(
     loop {
         draw_view(stdout, &lines, scroll, viewport_rows, &help)?;
         let input = read_input(stdin).map_err(|error| error.to_string())?;
-        if let Some(next) = scroll_by(input, scroll, max_scroll) {
+        if let Some(next) = scroll_by(input, scroll, max_scroll, viewport_rows) {
             scroll = next;
         } else if result_dismisses(input) {
             break;
@@ -409,7 +487,7 @@ fn run_branch_actions(
 ) -> Result<(), String> {
     let height = terminal_height().map_err(|error| error.to_string())?;
     let help = wrap_line(
-        "Click a button; 1-9/0: create; j/k or arrows: scroll; q: quit",
+        "Click a button; 1-9/0: create; j/k or arrows: select; PgUp/PgDn: scroll; q: quit",
         width,
     );
     let viewport_rows = height.saturating_sub(help.len());
@@ -420,17 +498,29 @@ fn run_branch_actions(
     let mut stdout = io::stdout();
     let mut stdin = io::stdin();
     write!(stdout, "{TERMINAL_ENTER}").map_err(|error| error.to_string())?;
-    let lines = table.text.lines().map(str::to_owned).collect::<Vec<_>>();
-    let max_scroll = lines.len().saturating_sub(viewport_rows);
+    let max_scroll = table.text.lines().count().saturating_sub(viewport_rows);
     let mut scroll = 0;
+    let mut selected = None;
+    let mut lines = table.lines(None);
     loop {
         draw_view(&mut stdout, &lines, scroll, viewport_rows, &help)?;
         let input = read_input(&mut stdin).map_err(|error| error.to_string())?;
         if input == ActionInput::Quit {
             break;
         }
-        if let Some(next) = scroll_by(input, scroll, max_scroll) {
+        if let Some((index, next)) = navigate_issue(input, table, selected, scroll, viewport_rows) {
+            selected = Some(index);
             scroll = next;
+            lines = table.lines(selected);
+            continue;
+        }
+        if let Some(next) = scroll_by(input, scroll, max_scroll, viewport_rows) {
+            scroll = next;
+            continue;
+        }
+        if let ActionInput::Hover { x, y } = input {
+            selected = hovered_issue(table, x, y, scroll, viewport_rows, width);
+            lines = table.lines(selected);
             continue;
         }
         if let Some(issue) = action_for(input, &table.buttons, scroll, viewport_rows)
@@ -520,11 +610,13 @@ mod interaction_tests {
             action_for(ActionInput::Mouse { x: 20, y: 5 }, &buttons, 0, 4),
             None
         );
-        assert_eq!(scroll_by(ActionInput::Key(b'j'), 0, 9), Some(1));
-        assert_eq!(scroll_by(ActionInput::Down, 8, 9), Some(9));
-        assert_eq!(scroll_by(ActionInput::Key(b'k'), 0, 9), Some(0));
-        assert_eq!(parse_mouse_event("<0;20;5M"), Some((20, 5)));
-        assert_eq!(parse_mouse_event("<32;20;5M"), None);
+        assert_eq!(scroll_by(ActionInput::Key(b'j'), 0, 9, 4), Some(1));
+        assert_eq!(scroll_by(ActionInput::Down, 8, 9, 4), Some(9));
+        assert_eq!(scroll_by(ActionInput::Key(b'k'), 0, 9, 4), Some(0));
+        assert_eq!(
+            parse_mouse_event("<0;20;5M"),
+            Some(ActionInput::Mouse { x: 20, y: 5 })
+        );
         assert!(matches!(
             read_input(&mut Cursor::new(b"\x1b[A")),
             Ok(ActionInput::Up)
@@ -537,12 +629,26 @@ mod interaction_tests {
             read_input(&mut Cursor::new(b"\x1b[<0;20;5M")),
             Ok(ActionInput::Mouse { x: 20, y: 5 })
         ));
+        assert!(matches!(
+            read_input(&mut Cursor::new(b"\x1b[<35;20;5M")),
+            Ok(ActionInput::Hover { x: 20, y: 5 })
+        ));
+        assert_eq!(
+            action_for(ActionInput::Hover { x: 20, y: 5 }, &buttons, 0, 24),
+            None
+        );
         let raw = raw_terminal(unsafe { std::mem::zeroed() });
         assert_eq!(raw.c_lflag & (libc::ICANON | libc::ECHO | libc::ISIG), 0);
         assert_eq!(raw.c_cc[libc::VMIN], 0);
         assert_eq!(raw.c_cc[libc::VTIME], 1);
-        assert_eq!(TERMINAL_ENTER, "\x1b[?1049h\x1b[?1000h\x1b[?1006h");
-        assert_eq!(TERMINAL_RESTORE, "\x1b[?1000l\x1b[?1006l\x1b[?1049l");
+        assert_eq!(
+            TERMINAL_ENTER,
+            "\x1b[?1049h\x1b[?1000h\x1b[?1003h\x1b[?1006h"
+        );
+        assert_eq!(
+            TERMINAL_RESTORE,
+            "\x1b[?1003l\x1b[?1000l\x1b[?1006l\x1b[?1049l"
+        );
         let lines = vec!["one".to_owned(), "two".to_owned(), "three".to_owned()];
         assert_eq!(visible_lines(&lines, 1, 2), ["two", "three"]);
         let long_error = wrap_message("a very long reason", 5);
@@ -585,5 +691,150 @@ mod interaction_tests {
         assert_eq!(no_input, ActionInput::Continue);
         assert!(!result_dismisses(no_input));
         assert!(result_dismisses(ActionInput::Key(b'x')));
+    }
+
+    #[test]
+    fn parses_mouse_motion_and_rejects_invalid_events() {
+        for button in 32..=35 {
+            assert_eq!(
+                parse_mouse_event(&format!("<{button};20;5M")),
+                Some(ActionInput::Hover { x: 20, y: 5 })
+            );
+        }
+        for invalid in ["<0;20;5m", "<64;20;5M", "<0;0;5M", "<0;20;0M", "<0;20;5;1M"] {
+            assert_eq!(parse_mouse_event(invalid), None);
+        }
+    }
+
+    #[test]
+    fn navigates_every_issue_even_when_the_table_fits_the_viewport() {
+        let mut issues = [42, 43, 44].map(|number| model::RankedIssue {
+            issue: model::Issue {
+                number,
+                title: format!("Issue {number}"),
+                body: String::new(),
+                source_order: 0,
+            },
+            score: 3.6,
+            prefix: "fix".to_owned(),
+        });
+        let table = render_table_with_buttons(&issues, 40);
+        assert!(table.is_ok());
+        let Ok(table) = table else { return };
+        assert!(table.text.lines().count() < 100);
+        let mut selected = None;
+        for (input, expected) in [
+            (ActionInput::Key(b'j'), 0),
+            (ActionInput::Key(b'j'), 1),
+            (ActionInput::Down, 2),
+            (ActionInput::Down, 2),
+            (ActionInput::Key(b'k'), 1),
+            (ActionInput::Up, 0),
+            (ActionInput::Up, 0),
+        ] {
+            let next = navigate_issue(input, &table, selected, 0, 100);
+            assert_eq!(next, Some((expected, 0)));
+            selected = next.map(|(index, _)| index);
+        }
+        for (index, issue) in table.issues.iter().enumerate() {
+            let hovered = hovered_issue(&table, 20, issue.lines.start + 1, 0, 100, 40);
+            assert_eq!(hovered, Some(index));
+            assert_eq!(
+                navigate_issue(ActionInput::Down, &table, hovered, 0, 100),
+                Some(((index + 1).min(2), 0))
+            );
+        }
+        assert_eq!(
+            navigate_issue(ActionInput::Continue, &table, selected, 0, 100),
+            None
+        );
+        for issue in &mut issues {
+            issue.issue.body = "long body\n".repeat(12);
+        }
+        let tall = render_table_with_buttons(&issues, 40);
+        assert!(tall.is_ok());
+        let Ok(tall) = tall else { return };
+        let mut selected = None;
+        let mut scroll = 0;
+        for expected in 0..3 {
+            let next = navigate_issue(ActionInput::Key(b'j'), &tall, selected, scroll, 4);
+            assert!(next.is_some());
+            let Some((index, next_scroll)) = next else {
+                return;
+            };
+            assert_eq!(index, expected);
+            assert!(
+                tall.issues
+                    .get(index)
+                    .is_some_and(|issue| issue.lines.start == next_scroll)
+            );
+            selected = Some(index);
+            scroll = next_scroll;
+        }
+        let empty = render_table_with_buttons(&[], 40);
+        assert!(empty.is_ok());
+        let Ok(empty) = empty else { return };
+        assert_eq!(navigate_issue(ActionInput::Down, &empty, None, 0, 4), None);
+    }
+
+    #[test]
+    fn page_keys_scroll_by_viewport_and_result_arrows_still_scroll_by_line() {
+        assert!(matches!(
+            read_input(&mut Cursor::new(b"\x1b[5~")),
+            Ok(ActionInput::PageUp)
+        ));
+        assert!(matches!(
+            read_input(&mut Cursor::new(b"\x1b[6~")),
+            Ok(ActionInput::PageDown)
+        ));
+        assert_eq!(scroll_by(ActionInput::PageDown, 0, 9, 4), Some(4));
+        assert_eq!(scroll_by(ActionInput::PageDown, 8, 9, 4), Some(9));
+        assert_eq!(scroll_by(ActionInput::PageUp, 6, 9, 4), Some(2));
+        assert_eq!(scroll_by(ActionInput::PageUp, 2, 9, 4), Some(0));
+        assert_eq!(scroll_by(ActionInput::Down, 0, 9, 4), Some(1));
+        assert_eq!(scroll_by(ActionInput::Key(b'k'), 6, 9, 4), Some(5));
+    }
+
+    #[test]
+    fn locates_hovered_and_scrolled_issues() {
+        let issues = [42, 43].map(|number| model::RankedIssue {
+            issue: model::Issue {
+                number,
+                title: "タイトル🙂".to_owned(),
+                body: "本文\n長い日本語の本文".to_owned(),
+                source_order: 0,
+            },
+            score: 3.6,
+            prefix: "fix".to_owned(),
+        });
+        let table = render_table_with_buttons(&issues, 26);
+        assert!(table.is_ok());
+        let Ok(table) = table else { return };
+        for (index, issue) in table.issues.iter().enumerate() {
+            for line in issue.lines.clone() {
+                assert_eq!(hovered_issue(&table, 20, 1, line, 4, 26), Some(index));
+                assert_eq!(first_visible_issue(&table, line, 4), Some(index));
+            }
+            assert_eq!(hovered_issue(&table, 20, 1, issue.lines.end, 4, 26), None);
+            assert_eq!(first_visible_issue(&table, issue.lines.start - 1, 1), None);
+            assert_eq!(
+                first_visible_issue(&table, issue.lines.start - 1, 2),
+                Some(index)
+            );
+        }
+        assert_eq!(hovered_issue(&table, 20, 1, 0, 4, 26), None);
+        for (x, y) in [(0, 1), (27, 1), (20, 0), (20, 5)] {
+            assert_eq!(hovered_issue(&table, x, y, 4, 4, 26), None);
+        }
+        assert_eq!(first_visible_issue(&table, 0, 4), None);
+        assert_eq!(
+            first_visible_issue(&table, table.text.lines().count(), 4),
+            None
+        );
+        let empty = render_table_with_buttons(&[], 26);
+        assert!(empty.is_ok());
+        let Ok(empty) = empty else { return };
+        assert_eq!(first_visible_issue(&empty, 0, 24), None);
+        assert_eq!(hovered_issue(&empty, 20, 1, 0, 24, 26), None);
     }
 }

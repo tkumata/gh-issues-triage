@@ -81,8 +81,21 @@ cargo run -- config set-root /absolute/path/to/projects
 cargo run -- owner/repo
 ```
 
-`owner/repo` のローカル対象は `<root>/repo` です。Issue 本文下のボタンをクリックするか、`1`〜`9`・`0`（10件目）でブランチを作成します。`j`/`k` または上下矢印で表示をスクロールし、`q` で終了します。ブランチ名は `<prefix>/issue-<number>` で、対象リポジトリの `main` を起点にします。作成時に対象リポジトリを新しいブランチへ切り替えます。CLI の作業ディレクトリ変更と push は行いません。root は `XDG_CONFIG_HOME/gh-issues-triage/config.json`、未設定時は `~/.config/gh-issues-triage/config.json` に保存します。
+`owner/repo` のローカル対象は `<root>/repo` です。Issue 本文下のボタンをクリックするか、`1`〜`9`・`0`（10件目）でブランチを作成します。
 
-GitHub または TypeSafe の応答、認証情報、端末幅の取得に失敗した場合は、途中結果を表示せず非ゼロで終了します。実 GitHub App、TypeSafe API、実端末での目視確認は別途必要です。
+Issue 一覧の操作は次のとおりです。
+
+| 操作 | 動作 |
+| --- | --- |
+| マウスオーバー | ポインターのある Issue を仮選択。対象外へ移動すると解除 |
+| `j` / 下矢印、`k` / 上矢印 | 次／前の Issue を仮選択し、必要なら自動スクロール。初回は先頭の表示 Issue を選択 |
+| PageUp / PageDown | 画面単位でスクロールし、長い本文を閲覧 |
+| `q` | 終了 |
+
+仮選択した Issue は、タイトル・本文・ボタンを含むセル全体を ANSI 16色の薄い青（bright blue）背景・黒文字でハイライトします。枠線の色は変えません。マウス移動と仮選択キーの最後の操作に合わせて選択を切り替え、仮選択だけではブランチを作成しません。ブランチ作成結果の画面では、`j`/`k`・上下矢印は1行ずつスクロールします。
+
+ブランチ名は `<prefix>/issue-<number>` で、対象リポジトリの `main` を起点にします。作成時に対象リポジトリを新しいブランチへ切り替えます。CLI の作業ディレクトリ変更と push は行いません。root は `XDG_CONFIG_HOME/gh-issues-triage/config.json`、未設定時は `~/.config/gh-issues-triage/config.json` に保存します。
+
+GitHub または TypeSafe の応答、認証情報、端末幅の取得に失敗した場合は、途中結果を表示せず非ゼロで終了します。実 GitHub App の認証と TypeSafe API の確認は、自動テストとは別に行います。一覧のハイライトと操作は、2026-10-01 にユーザーが実端末で動作確認済みです。
 
 ![GitHub Issues Triage](./docs/images/gh-issues-triage-screenshot.png)

@@ -19,6 +19,26 @@ pub(crate) struct ButtonRegion {
 pub(crate) struct RenderedTable {
     pub(crate) text: String,
     pub(crate) buttons: Vec<ButtonRegion>,
+    pub(crate) issues: Vec<IssueRegion>,
+}
+
+pub(crate) struct IssueRegion {
+    pub(crate) lines: std::ops::Range<usize>,
+    highlighted: Vec<String>,
+}
+
+impl RenderedTable {
+    pub(crate) fn lines(&self, highlighted: Option<usize>) -> Vec<String> {
+        let mut lines = self.text.lines().map(str::to_owned).collect::<Vec<_>>();
+        if let Some(issue) = highlighted.and_then(|index| self.issues.get(index)) {
+            for (line_index, highlighted_line) in issue.lines.clone().zip(&issue.highlighted) {
+                if let Some(line) = lines.get_mut(line_index) {
+                    line.clone_from(highlighted_line);
+                }
+            }
+        }
+        lines
+    }
 }
 
 impl std::fmt::Display for DisplayError {
@@ -114,13 +134,16 @@ fn horizontal_rule(left: char, junction: char, right: char, widths: [usize; 3]) 
     )
 }
 
-fn table_row(cells: [&str; 3], widths: [usize; 3]) -> String {
-    format!(
-        "│ {} │ {} │ {} │",
-        pad_cell(cells[0], widths[0]),
-        pad_cell(cells[1], widths[1]),
-        pad_cell(cells[2], widths[2])
-    )
+fn table_row(cells: [&str; 3], widths: [usize; 3], highlighted: bool) -> String {
+    let cells = cells.into_iter().zip(widths).map(|(cell, width)| {
+        let padded = format!(" {} ", pad_cell(cell, width));
+        if highlighted {
+            format!("\x1b[30;104m{padded}\x1b[39;49m")
+        } else {
+            padded
+        }
+    });
+    format!("│{}│", cells.collect::<Vec<_>>().join("│"))
 }
 
 #[cfg(test)]
@@ -154,18 +177,22 @@ pub(crate) fn render_table_with_buttons(
         .map(|line| pad_cell(&line, width))
         .collect::<Vec<_>>();
     lines.push(horizontal_rule('┌', '┬', '┐', widths));
-    lines.push(table_row(["重要度", "番号", "Issues"], widths));
+    lines.push(table_row(["重要度", "番号", "Issues"], widths, false));
     if issues.is_empty() {
         lines.push(horizontal_rule('└', '┴', '┘', widths));
         return Ok(RenderedTable {
             text: lines.join("\n"),
             buttons: Vec::new(),
+            issues: Vec::new(),
         });
     }
     lines.push(horizontal_rule('├', '┼', '┤', widths));
     let content_column = widths[0] + widths[1] + 9;
     let mut buttons = Vec::new();
+    let mut issue_regions = Vec::new();
     for (issue_index, ranked) in issues.iter().enumerate() {
+        let first_line = lines.len();
+        let mut highlighted = Vec::new();
         let mut content = ranked
             .issue
             .title
@@ -193,7 +220,9 @@ pub(crate) fn render_table_with_buttons(
                 } else {
                     String::new()
                 };
-                lines.push(table_row([&importance, &number, wrapped], widths));
+                let cells = [importance.as_str(), number.as_str(), wrapped.as_str()];
+                lines.push(table_row(cells, widths, false));
+                highlighted.push(table_row(cells, widths, true));
                 if content_index == button_index {
                     buttons.push(ButtonRegion {
                         issue_index,
@@ -205,6 +234,10 @@ pub(crate) fn render_table_with_buttons(
                 issue_line_index += 1;
             }
         }
+        issue_regions.push(IssueRegion {
+            lines: first_line..lines.len(),
+            highlighted,
+        });
         if issue_index + 1 < issues.len() {
             lines.push(horizontal_rule('├', '┼', '┤', widths));
         }
@@ -214,6 +247,7 @@ pub(crate) fn render_table_with_buttons(
     Ok(RenderedTable {
         text: lines.join("\n"),
         buttons,
+        issues: issue_regions,
     })
 }
 
@@ -293,5 +327,43 @@ mod tests {
                 && unsafe_table.text.contains("title [31m")
                 && unsafe_table.text.contains("line  "))
         );
+    }
+
+    #[test]
+    fn highlights_issue_cells_and_preserves_borders() {
+        let table = render_table_with_buttons(
+            &[
+                issue(42, "タイトル│🙂", "本文\n\x1b[31m"),
+                issue(43, "next", "body"),
+            ],
+            26,
+        );
+        assert!(table.is_ok());
+        let Ok(table) = table else { return };
+        let plain = table.text.lines().map(str::to_owned).collect::<Vec<_>>();
+        assert_eq!(table.lines(None), plain);
+        for (selected, region) in table.issues.iter().enumerate() {
+            let highlighted = table.lines(Some(selected));
+            for (line_index, (line, original)) in highlighted.iter().zip(&plain).enumerate() {
+                if region.lines.contains(&line_index) {
+                    assert_eq!(line.matches("\x1b[30;104m").count(), 3);
+                    assert_eq!(line.matches("\x1b[39;49m").count(), 3);
+                    assert!(line.starts_with("│\x1b[30;104m "));
+                    assert!(line.ends_with(" \x1b[39;49m│"));
+                    assert_eq!(line.matches("\x1b[39;49m│").count(), 3);
+                    let uncolored = line.replace("\x1b[30;104m", "").replace("\x1b[39;49m", "");
+                    assert_eq!(&uncolored, original);
+                    assert_eq!(uncolored.width(), 26);
+                } else {
+                    assert_eq!(line, original);
+                }
+            }
+        }
+        assert!(plain.iter().any(|line| line.contains("│🙂")));
+        let empty = render_table_with_buttons(&[], 40);
+        assert!(empty.is_ok());
+        let Ok(empty) = empty else { return };
+        assert!(empty.issues.is_empty());
+        assert_eq!(empty.lines(None).join("\n"), empty.text);
     }
 }
