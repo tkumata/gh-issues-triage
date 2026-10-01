@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     env, fs,
     path::{Path, PathBuf},
     process::Command,
@@ -6,7 +7,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{RankedIssue, RepositoryRef};
+use crate::model::{RankedIssue, RepositoryRef, issue_branch_number};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Config {
@@ -64,7 +65,12 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
         .output()
         .map_err(|error| format!("cannot run git: {error}"))?;
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+        return Err(format!(
+            "git {} failed ({}): {}",
+            args.join(" "),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
@@ -91,11 +97,23 @@ pub(crate) fn create_branch(
     create_branch_at(&root()?, repository, issue)
 }
 
-fn create_branch_at(
+pub(crate) fn local_issue_branches(repository: &RepositoryRef) -> Result<BTreeSet<u64>, String> {
+    local_issue_branches_at(&root()?, repository)
+}
+
+fn local_issue_branches_at(
     root: &Path,
     repository: &RepositoryRef,
-    issue: &RankedIssue,
-) -> Result<String, String> {
+) -> Result<BTreeSet<u64>, String> {
+    let directory = repository_directory(root, repository)?;
+    let references = git(
+        &directory,
+        &["for-each-ref", "--format=%(refname)", "refs/heads/"],
+    )?;
+    Ok(references.lines().filter_map(issue_branch_number).collect())
+}
+
+fn repository_directory(root: &Path, repository: &RepositoryRef) -> Result<PathBuf, String> {
     if repository.repo == "." || repository.repo == ".." {
         return Err("repository name is not a valid directory name".to_owned());
     }
@@ -120,6 +138,15 @@ fn create_branch_at(
     if !github_remote_matches(&remote, repository) {
         return Err("remote.origin does not match the requested GitHub repository".to_owned());
     }
+    Ok(directory)
+}
+
+fn create_branch_at(
+    root: &Path,
+    repository: &RepositoryRef,
+    issue: &RankedIssue,
+) -> Result<String, String> {
+    let directory = repository_directory(root, repository)?;
     git(
         &directory,
         &["show-ref", "--verify", "--quiet", "refs/heads/main"],
@@ -238,6 +265,7 @@ mod tests {
         let root = temp.join("projects");
         fs::create_dir(&root)?;
         let config = temp.join("config.json");
+        check(read_config(&config).is_err(), "missing root was accepted")?;
         write_config(&config, &root)?;
         check(read_config(&config)? == root, "saved root did not reload")?;
 
@@ -305,6 +333,103 @@ mod tests {
             "remote mismatch was accepted",
         )?;
         fs::remove_dir_all(temp)?;
+        Ok(())
+    }
+
+    #[test]
+    fn reads_local_issue_branches_without_main_or_worktree_changes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_dir()?;
+        let repo = root.join("repo");
+        fs::create_dir(&repo)?;
+        run(&repo, &["init", "--initial-branch=work"])?;
+        run(&repo, &["config", "user.email", "test@example.com"])?;
+        run(&repo, &["config", "user.name", "Test"])?;
+        run(
+            &repo,
+            &["remote", "add", "origin", "git@github.com:owner/repo.git"],
+        )?;
+        fs::write(repo.join("file"), "initial")?;
+        run(&repo, &["add", "file"])?;
+        run(&repo, &["commit", "-m", "initial"])?;
+        for name in [
+            "docs/issue-42",
+            "fix/issue-420",
+            "feat/issue-43",
+            "chore/issue-44",
+            "refactor/issue-45",
+            "task/issue-47",
+            "fix/issue-048",
+            "fix/issue-+49",
+            "fix/issue-50-extra",
+        ] {
+            run(&repo, &["branch", name])?;
+        }
+        run(
+            &repo,
+            &["update-ref", "refs/remotes/origin/fix/issue-46", "HEAD"],
+        )?;
+        fs::write(repo.join("file"), "uncommitted")?;
+        let before = run(&repo, &["status", "--porcelain"])?;
+        let refs_before = run(&repo, &["for-each-ref", "--format=%(refname)"])?;
+        let reference = RepositoryRef {
+            owner: "owner".into(),
+            repo: "repo".into(),
+        };
+        check(
+            local_issue_branches_at(&root, &reference)? == BTreeSet::from([42, 43, 44, 45, 420]),
+            "local Issue branches did not match exact supported names",
+        )?;
+        check(
+            run(&repo, &["branch", "--show-current"])? == "work",
+            "existence check changed checkout",
+        )?;
+        check(
+            fs::read_to_string(repo.join("file"))? == "uncommitted",
+            "existence check changed worktree contents",
+        )?;
+        check(
+            run(&repo, &["status", "--porcelain"])? == before,
+            "existence check changed worktree status",
+        )?;
+        check(
+            run(&repo, &["for-each-ref", "--format=%(refname)"])? == refs_before,
+            "existence check changed refs",
+        )?;
+        check(
+            local_issue_branches_at(
+                &root,
+                &RepositoryRef {
+                    owner: "other".into(),
+                    repo: "repo".into(),
+                },
+            )
+            .is_err(),
+            "existence check accepted mismatched origin",
+        )?;
+        check(
+            local_issue_branches_at(
+                &root,
+                &RepositoryRef {
+                    owner: "owner".into(),
+                    repo: "missing".into(),
+                },
+            )
+            .is_err(),
+            "existence check accepted missing repository",
+        )?;
+        run(&repo, &["remote", "remove", "origin"])?;
+        check(
+            local_issue_branches_at(&root, &reference)
+                .is_err_and(|reason| reason.contains("git config --get remote.origin.url failed")),
+            "missing origin did not provide a reason",
+        )?;
+        fs::rename(repo.join(".git"), repo.join("saved.git"))?;
+        check(
+            local_issue_branches_at(&root, &reference).is_err(),
+            "existence check ignored Git failure",
+        )?;
+        fs::remove_dir_all(root)?;
         Ok(())
     }
 

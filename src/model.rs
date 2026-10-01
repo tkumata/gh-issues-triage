@@ -8,6 +8,28 @@ pub(crate) const SCORE_CRITERIA: [&str; 5] = [
     "データ損失、セキュリティ、サービス停止など直ちに対応すべき影響",
 ];
 
+pub(crate) const BRANCH_CRITERIA: [(&str, &str); 5] = [
+    (
+        "refactor",
+        "internal improvement without a user-facing behavior change",
+    ),
+    ("fix", "fix an existing defect"),
+    ("feat", "add or extend user-facing functionality"),
+    ("chore", "maintenance, dependencies, or development tooling"),
+    ("docs", "documentation only"),
+];
+
+pub(crate) fn issue_branch_number(reference: &str) -> Option<u64> {
+    let (prefix, suffix) = reference
+        .strip_prefix("refs/heads/")?
+        .split_once("/issue-")?;
+    if !BRANCH_CRITERIA.iter().any(|(key, _)| *key == prefix) {
+        return None;
+    }
+    let number = suffix.parse::<u64>().ok()?;
+    (suffix == number.to_string()).then_some(number)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RepositoryRef {
     pub(crate) owner: String,
