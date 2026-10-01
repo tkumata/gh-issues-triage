@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     env,
     fmt::{self, Display, Formatter},
     io::{self, Read, Write},
@@ -147,11 +148,16 @@ fn run_repository(repository: &RepositoryRef) -> Result<(), AppError> {
         triage_issues(&client, &typesafe_api_key()?, issues)?
     };
     let width = terminal_width()?;
-    let table = render_table_with_buttons(&ranked, width)?;
+    let branches = if ranked.is_empty() {
+        Ok(BTreeSet::new())
+    } else {
+        branch::local_issue_branches(repository)
+    };
+    let table = render_table_with_buttons(&ranked, width, &branches)?;
     if ranked.is_empty() {
         println!("{}", table.text);
     } else {
-        run_branch_actions(repository, &ranked, &table, width).map_err(AppError::Interaction)?;
+        run_branch_actions(repository, &ranked, table, width).map_err(AppError::Interaction)?;
     }
     Ok(())
 }
@@ -482,33 +488,37 @@ fn show_result(
 fn run_branch_actions(
     repository: &RepositoryRef,
     issues: &[model::RankedIssue],
-    table: &RenderedTable,
+    mut table: RenderedTable,
     width: usize,
 ) -> Result<(), String> {
     let height = terminal_height().map_err(|error| error.to_string())?;
-    let help = wrap_line(
+    let action_help = wrap_line(
         "Click a button; 1-9/0: create; j/k or arrows: select; PgUp/PgDn: scroll; q: quit",
         width,
     );
-    let viewport_rows = height.saturating_sub(help.len());
-    if viewport_rows == 0 {
-        return Err("terminal is too short to show issue actions".to_owned());
-    }
     let mut terminal = TerminalMode::enter()?;
     let mut stdout = io::stdout();
     let mut stdin = io::stdin();
     write!(stdout, "{TERMINAL_ENTER}").map_err(|error| error.to_string())?;
-    let max_scroll = table.text.lines().count().saturating_sub(viewport_rows);
     let mut scroll = 0;
     let mut selected = None;
     let mut lines = table.lines(None);
     loop {
+        let mut help = action_help.clone();
+        help.extend(table.branch_help.iter().cloned());
+        let viewport_rows = height.saturating_sub(help.len());
+        if viewport_rows == 0 {
+            return Err("terminal is too short to show issue actions".to_owned());
+        }
+        let max_scroll = table.text.lines().count().saturating_sub(viewport_rows);
+        scroll = scroll.min(max_scroll);
         draw_view(&mut stdout, &lines, scroll, viewport_rows, &help)?;
         let input = read_input(&mut stdin).map_err(|error| error.to_string())?;
         if input == ActionInput::Quit {
             break;
         }
-        if let Some((index, next)) = navigate_issue(input, table, selected, scroll, viewport_rows) {
+        if let Some((index, next)) = navigate_issue(input, &table, selected, scroll, viewport_rows)
+        {
             selected = Some(index);
             scroll = next;
             lines = table.lines(selected);
@@ -519,18 +529,26 @@ fn run_branch_actions(
             continue;
         }
         if let ActionInput::Hover { x, y } = input {
-            selected = hovered_issue(table, x, y, scroll, viewport_rows, width);
+            selected = hovered_issue(&table, x, y, scroll, viewport_rows, width);
             lines = table.lines(selected);
             continue;
         }
         if let Some(issue) = action_for(input, &table.buttons, scroll, viewport_rows)
             .and_then(|index| issues.get(index))
         {
-            let message = branch::create_branch(repository, issue).map_or_else(
+            let result = branch::create_branch(repository, issue);
+            let succeeded = result.is_ok();
+            let message = result.map_or_else(
                 |error| format!("Branch creation failed: {error}"),
                 |name| format!("Created branch {name}"),
             );
             show_result(&message, width, height, &mut stdin, &mut stdout)?;
+            if succeeded {
+                let branches = branch::local_issue_branches(repository);
+                table = render_table_with_buttons(issues, width, &branches)
+                    .map_err(|error| error.to_string())?;
+                lines = table.lines(selected);
+            }
         }
     }
     terminal.restore()?;
@@ -718,7 +736,7 @@ mod interaction_tests {
             score: 3.6,
             prefix: "fix".to_owned(),
         });
-        let table = render_table_with_buttons(&issues, 40);
+        let table = render_table_with_buttons(&issues, 40, &Ok(BTreeSet::new()));
         assert!(table.is_ok());
         let Ok(table) = table else { return };
         assert!(table.text.lines().count() < 100);
@@ -751,7 +769,7 @@ mod interaction_tests {
         for issue in &mut issues {
             issue.issue.body = "long body\n".repeat(12);
         }
-        let tall = render_table_with_buttons(&issues, 40);
+        let tall = render_table_with_buttons(&issues, 40, &Ok(BTreeSet::new()));
         assert!(tall.is_ok());
         let Ok(tall) = tall else { return };
         let mut selected = None;
@@ -771,7 +789,7 @@ mod interaction_tests {
             selected = Some(index);
             scroll = next_scroll;
         }
-        let empty = render_table_with_buttons(&[], 40);
+        let empty = render_table_with_buttons(&[], 40, &Ok(BTreeSet::new()));
         assert!(empty.is_ok());
         let Ok(empty) = empty else { return };
         assert_eq!(navigate_issue(ActionInput::Down, &empty, None, 0, 4), None);
@@ -807,34 +825,34 @@ mod interaction_tests {
             score: 3.6,
             prefix: "fix".to_owned(),
         });
-        let table = render_table_with_buttons(&issues, 26);
+        let table = render_table_with_buttons(&issues, 29, &Ok(BTreeSet::new()));
         assert!(table.is_ok());
         let Ok(table) = table else { return };
         for (index, issue) in table.issues.iter().enumerate() {
             for line in issue.lines.clone() {
-                assert_eq!(hovered_issue(&table, 20, 1, line, 4, 26), Some(index));
+                assert_eq!(hovered_issue(&table, 20, 1, line, 4, 29), Some(index));
                 assert_eq!(first_visible_issue(&table, line, 4), Some(index));
             }
-            assert_eq!(hovered_issue(&table, 20, 1, issue.lines.end, 4, 26), None);
+            assert_eq!(hovered_issue(&table, 20, 1, issue.lines.end, 4, 29), None);
             assert_eq!(first_visible_issue(&table, issue.lines.start - 1, 1), None);
             assert_eq!(
                 first_visible_issue(&table, issue.lines.start - 1, 2),
                 Some(index)
             );
         }
-        assert_eq!(hovered_issue(&table, 20, 1, 0, 4, 26), None);
-        for (x, y) in [(0, 1), (27, 1), (20, 0), (20, 5)] {
-            assert_eq!(hovered_issue(&table, x, y, 4, 4, 26), None);
+        assert_eq!(hovered_issue(&table, 20, 1, 0, 4, 29), None);
+        for (x, y) in [(0, 1), (30, 1), (20, 0), (20, 5)] {
+            assert_eq!(hovered_issue(&table, x, y, 4, 4, 29), None);
         }
         assert_eq!(first_visible_issue(&table, 0, 4), None);
         assert_eq!(
             first_visible_issue(&table, table.text.lines().count(), 4),
             None
         );
-        let empty = render_table_with_buttons(&[], 26);
+        let empty = render_table_with_buttons(&[], 29, &Ok(BTreeSet::new()));
         assert!(empty.is_ok());
         let Ok(empty) = empty else { return };
         assert_eq!(first_visible_issue(&empty, 0, 24), None);
-        assert_eq!(hovered_issue(&empty, 20, 1, 0, 24, 26), None);
+        assert_eq!(hovered_issue(&empty, 20, 1, 0, 24, 29), None);
     }
 }

@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, fmt, thread, time::Duration};
 use reqwest::blocking::Client;
 use serde_json::{Value, json};
 
-use crate::model::{Issue, RankedIssue, SCORE_CRITERIA, rank_issues};
+use crate::model::{BRANCH_CRITERIA, Issue, RankedIssue, SCORE_CRITERIA, rank_issues};
 
 const TYPESAFE_API_KEY_ENV: &str = "TYPESAFE_API_KEY";
 const TYPESAFE_URL: &str = "https://api.typesafe.ai/v1/systemone";
@@ -13,16 +13,6 @@ const JEV_INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 // TypeSafe rounds each probability and score to two decimals.
 const ANSWER_ROUNDING_ERROR: f64 = 0.005;
 const FLOATING_POINT_MARGIN: f64 = 1e-9;
-const BRANCH_CRITERIA: [(&str, &str); 5] = [
-    (
-        "refactor",
-        "internal improvement without a user-facing behavior change",
-    ),
-    ("fix", "fix an existing defect"),
-    ("feat", "add or extend user-facing functionality"),
-    ("chore", "maintenance, dependencies, or development tooling"),
-    ("docs", "documentation only"),
-];
 #[derive(Debug)]
 pub(crate) enum JevError {
     MissingApiKey,
