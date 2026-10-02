@@ -19,6 +19,47 @@ pub(crate) const BRANCH_CRITERIA: [(&str, &str); 5] = [
     ("docs", "documentation only"),
 ];
 
+pub(crate) const READINESS_CRITERIA: [(&str, &str); 3] = [
+    (
+        "Yes",
+        "Requirements and completion criteria are clear, reproduction conditions are sufficient when applicable, and no missing information or prerequisite investigation blocks implementation.",
+    ),
+    (
+        "Needs information",
+        "Requirements, completion criteria, or applicable reproduction conditions are missing or unclear; information from the reporter or requester is needed. Prefer this over Needs investigation when both apply.",
+    ),
+    (
+        "Needs investigation",
+        "Requirements, completion criteria, and applicable reproduction conditions are sufficient, but technical investigation of cause, impact, or feasibility is needed before implementation.",
+    ),
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Readiness {
+    Yes,
+    NeedsInformation,
+    NeedsInvestigation,
+}
+
+impl Readiness {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Yes => "Yes",
+            Self::NeedsInformation => "Needs information",
+            Self::NeedsInvestigation => "Needs investigation",
+        }
+    }
+
+    pub(crate) fn from_choice(choice: &str) -> Option<Self> {
+        match choice {
+            "Yes" => Some(Self::Yes),
+            "Needs information" => Some(Self::NeedsInformation),
+            "Needs investigation" => Some(Self::NeedsInvestigation),
+            _ => None,
+        }
+    }
+}
+
 pub(crate) fn issue_branch_number(reference: &str) -> Option<u64> {
     let (prefix, suffix) = reference
         .strip_prefix("refs/heads/")?
@@ -49,16 +90,21 @@ pub(crate) struct RankedIssue {
     pub(crate) issue: Issue,
     pub(crate) score: f64,
     pub(crate) prefix: String,
+    pub(crate) readiness: Readiness,
 }
 
-pub(crate) fn rank_issues(issues: Vec<Issue>, scores: Vec<(f64, String)>) -> Vec<RankedIssue> {
+pub(crate) fn rank_issues(
+    issues: Vec<Issue>,
+    scores: Vec<(f64, String, Readiness)>,
+) -> Vec<RankedIssue> {
     let mut ranked = issues
         .into_iter()
         .zip(scores)
-        .map(|(issue, (score, prefix))| RankedIssue {
+        .map(|(issue, (score, prefix, readiness))| RankedIssue {
             issue,
             score,
             prefix,
+            readiness,
         })
         .collect::<Vec<_>>();
     ranked.sort_by(|left, right| {
@@ -99,10 +145,21 @@ mod tests {
                 },
             ],
             vec![
-                (2.0, "fix".to_owned()),
-                (4.0, "feat".to_owned()),
-                (2.0, "docs".to_owned()),
+                (2.0, "fix".to_owned(), Readiness::NeedsInvestigation),
+                (4.0, "feat".to_owned(), Readiness::NeedsInformation),
+                (2.0, "docs".to_owned(), Readiness::Yes),
             ],
+        );
+        assert_eq!(
+            ranked
+                .iter()
+                .map(|issue| issue.readiness)
+                .collect::<Vec<_>>(),
+            [
+                Readiness::NeedsInformation,
+                Readiness::NeedsInvestigation,
+                Readiness::Yes
+            ]
         );
         assert_eq!(
             ranked

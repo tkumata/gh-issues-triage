@@ -735,6 +735,7 @@ mod interaction_tests {
             },
             score: 3.6,
             prefix: "fix".to_owned(),
+            readiness: crate::model::Readiness::Yes,
         });
         let table = render_table_with_buttons(&issues, 40, &Ok(BTreeSet::new()));
         assert!(table.is_ok());
@@ -824,35 +825,36 @@ mod interaction_tests {
             },
             score: 3.6,
             prefix: "fix".to_owned(),
+            readiness: crate::model::Readiness::Yes,
         });
-        let table = render_table_with_buttons(&issues, 29, &Ok(BTreeSet::new()));
+        let table = render_table_with_buttons(&issues, 37, &Ok(BTreeSet::new()));
         assert!(table.is_ok());
         let Ok(table) = table else { return };
         for (index, issue) in table.issues.iter().enumerate() {
             for line in issue.lines.clone() {
-                assert_eq!(hovered_issue(&table, 20, 1, line, 4, 29), Some(index));
+                assert_eq!(hovered_issue(&table, 20, 1, line, 4, 37), Some(index));
                 assert_eq!(first_visible_issue(&table, line, 4), Some(index));
             }
-            assert_eq!(hovered_issue(&table, 20, 1, issue.lines.end, 4, 29), None);
+            assert_eq!(hovered_issue(&table, 20, 1, issue.lines.end, 4, 37), None);
             assert_eq!(first_visible_issue(&table, issue.lines.start - 1, 1), None);
             assert_eq!(
                 first_visible_issue(&table, issue.lines.start - 1, 2),
                 Some(index)
             );
         }
-        assert_eq!(hovered_issue(&table, 20, 1, 0, 4, 29), None);
-        for (x, y) in [(0, 1), (30, 1), (20, 0), (20, 5)] {
-            assert_eq!(hovered_issue(&table, x, y, 4, 4, 29), None);
+        assert_eq!(hovered_issue(&table, 20, 1, 0, 4, 37), None);
+        for (x, y) in [(0, 1), (38, 1), (20, 0), (20, 5)] {
+            assert_eq!(hovered_issue(&table, x, y, 4, 4, 37), None);
         }
         assert_eq!(first_visible_issue(&table, 0, 4), None);
         assert_eq!(
             first_visible_issue(&table, table.text.lines().count(), 4),
             None
         );
-        let empty = render_table_with_buttons(&[], 29, &Ok(BTreeSet::new()));
+        let empty = render_table_with_buttons(&[], 37, &Ok(BTreeSet::new()));
         assert!(empty.is_ok());
         let Ok(empty) = empty else { return };
         assert_eq!(first_visible_issue(&empty, 0, 24), None);
-        assert_eq!(hovered_issue(&empty, 20, 1, 0, 24, 29), None);
+        assert_eq!(hovered_issue(&empty, 20, 1, 0, 24, 37), None);
     }
 }

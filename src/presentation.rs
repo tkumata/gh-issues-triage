@@ -126,18 +126,12 @@ fn pad_cell(value: &str, width: usize) -> String {
     format!("{value}{}", " ".repeat(width.saturating_sub(value.width())))
 }
 
-fn horizontal_rule(left: char, junction: char, right: char, widths: [usize; 3]) -> String {
-    format!(
-        "{left}{}{}{}{}{}{right}",
-        "─".repeat(widths[0] + 2),
-        junction,
-        "─".repeat(widths[1] + 2),
-        junction,
-        "─".repeat(widths[2] + 2)
-    )
+fn horizontal_rule(left: char, junction: char, right: char, widths: [usize; 4]) -> String {
+    let cells = widths.map(|width| "─".repeat(width + 2));
+    format!("{left}{}{right}", cells.join(&junction.to_string()))
 }
 
-fn table_row(cells: [&str; 3], widths: [usize; 3], highlighted: bool) -> String {
+fn table_row(cells: [&str; 4], widths: [usize; 4], highlighted: bool) -> String {
     let cells = cells.into_iter().zip(widths).map(|(cell, width)| {
         let padded = format!(" {} ", pad_cell(cell, width));
         if highlighted {
@@ -167,17 +161,19 @@ fn render_table(issues: &[RankedIssue], width: usize) -> Result<String, DisplayE
     render_table_with_buttons(issues, width, &Ok(BTreeSet::new())).map(|table| table.text)
 }
 
-pub(crate) fn render_table_with_buttons(
-    issues: &[RankedIssue],
-    width: usize,
-    branches: &Result<BTreeSet<u64>, String>,
-) -> Result<RenderedTable, DisplayError> {
+fn table_widths(issues: &[RankedIssue], width: usize) -> Result<[usize; 4], DisplayError> {
     let importance_width = issues
         .iter()
         .map(|issue| score_label(issue.score).width())
         .max()
         .unwrap_or(0)
         .max("重要度".width());
+    let ready_width = issues
+        .iter()
+        .map(|issue| issue.readiness.label().width())
+        .max()
+        .unwrap_or(0)
+        .max("Ready".width());
     let number_label_width = issues
         .iter()
         .map(|issue| format!("#{}", issue.issue.number).width())
@@ -188,17 +184,34 @@ pub(crate) fn render_table_with_buttons(
     if !issues.is_empty() {
         number_width += 1 + "🌿".width();
     }
-    let fixed_width = importance_width + number_width + 10;
+    let fixed_width = importance_width + ready_width + number_width + 13;
     if width <= fixed_width || width - fixed_width < "Issues".width() {
         return Err(DisplayError::TerminalWidthTooSmall { width });
     }
-    let widths = [importance_width, number_width, width - fixed_width];
+    Ok([
+        importance_width,
+        ready_width,
+        number_width,
+        width - fixed_width,
+    ])
+}
+
+pub(crate) fn render_table_with_buttons(
+    issues: &[RankedIssue],
+    width: usize,
+    branches: &Result<BTreeSet<u64>, String>,
+) -> Result<RenderedTable, DisplayError> {
+    let widths = table_widths(issues, width)?;
     let mut lines = wrap_line("重要度: 0（低）〜4（高）", width)
         .into_iter()
         .map(|line| pad_cell(&line, width))
         .collect::<Vec<_>>();
     lines.push(horizontal_rule('┌', '┬', '┐', widths));
-    lines.push(table_row(["重要度", "番号", "Issues"], widths, false));
+    lines.push(table_row(
+        ["重要度", "Ready", "番号", "Issues"],
+        widths,
+        false,
+    ));
     if issues.is_empty() {
         lines.push(horizontal_rule('└', '┴', '┘', widths));
         return Ok(RenderedTable {
@@ -209,7 +222,8 @@ pub(crate) fn render_table_with_buttons(
         });
     }
     lines.push(horizontal_rule('├', '┼', '┤', widths));
-    let content_column = widths[0] + widths[1] + 9;
+    let number_label_width = widths[2] - 1 - "🌿".width();
+    let content_column = widths[0] + widths[1] + widths[2] + 12;
     let mut buttons = Vec::new();
     let mut issue_regions = Vec::new();
     for (issue_index, ranked) in issues.iter().enumerate() {
@@ -230,7 +244,7 @@ pub(crate) fn render_table_with_buttons(
         content.push(format!("[{}] Create branch", issue_index + 1));
         let mut issue_line_index = 0;
         for (content_index, content_line) in content.into_iter().enumerate() {
-            let wrapped_lines = wrap_line(&content_line, widths[2]);
+            let wrapped_lines = wrap_line(&content_line, widths[3]);
             for wrapped in &wrapped_lines {
                 let importance = if issue_line_index == 0 {
                     score_label(ranked.score)
@@ -242,7 +256,17 @@ pub(crate) fn render_table_with_buttons(
                 } else {
                     String::new()
                 };
-                let cells = [importance.as_str(), number.as_str(), wrapped.as_str()];
+                let ready = if issue_line_index == 0 {
+                    ranked.readiness.label()
+                } else {
+                    ""
+                };
+                let cells = [
+                    importance.as_str(),
+                    ready,
+                    number.as_str(),
+                    wrapped.as_str(),
+                ];
                 lines.push(table_row(cells, widths, false));
                 highlighted.push(table_row(cells, widths, true));
                 if content_index == button_index {
@@ -298,13 +322,14 @@ mod tests {
             },
             score: 3.6,
             prefix: "fix".to_owned(),
+            readiness: crate::model::Readiness::Yes,
         }
     }
 
     #[test]
     fn wraps_unicode_newlines_and_renders_empty_table() {
         let issue = issue(42, "タイトル🙂", "本文\n長い日本語");
-        for width in [29, 40, 60] {
+        for width in [37, 40, 60] {
             assert!(matches!(
                 render_table(std::slice::from_ref(&issue), width),
                 Ok(output) if output.lines().all(|line| line.width() == width)
@@ -316,31 +341,87 @@ mod tests {
         ));
         assert!(matches!(render_table(&[], 40), Ok(output)
             if output.lines().count() == 4
+                && output.contains("Ready")
                 && output.lines().next().is_some_and(|line| line.trim() == "重要度: 0（低）〜4（高）")));
         assert!(render_table(&[], 10).is_err());
-        assert!(render_table(std::slice::from_ref(&issue), 28).is_err());
+        assert!(render_table(std::slice::from_ref(&issue), 36).is_err());
     }
 
     #[test]
     fn places_button_region_after_each_issue_body_and_within_table_width() {
         let issues = [issue(42, "title", "first\nsecond"), issue(43, "next", "")];
-        let rendered = render_table_with_buttons(&issues, 43, &Ok(BTreeSet::new()));
+        let rendered = render_table_with_buttons(&issues, 51, &Ok(BTreeSet::new()));
         assert!(matches!(rendered, Ok(table)
             if table.buttons.len() == 2
                 && table.buttons.first().is_some_and(|button| button.issue_index == 0)
                 && table.buttons.get(1).is_some_and(|button| button.issue_index == 1)
-                && table.text.lines().all(|line| line.width() == 43)
-                && table.buttons.first().is_some_and(|button| button.x_start == 22 && button.x_end - button.x_start + 1 == "[1] Create branch".width())
+                && table.text.lines().all(|line| line.width() == 51)
+                && table.buttons.first().is_some_and(|button| button.x_start == 30 && button.x_end - button.x_start + 1 == "[1] Create branch".width())
                 && table.buttons.first().and_then(|button| table.text.lines().nth(button.line - 1)).is_some_and(|line| line.contains("Branch:"))
-                && table.buttons.first().and_then(|button| table.text.lines().nth(button.line - 2)).is_some_and(|line| line.split('│').nth(3).is_some_and(|cell| cell.trim().is_empty()))
+                && table.buttons.first().and_then(|button| table.text.lines().nth(button.line - 2)).is_some_and(|line| line.split('│').nth(4).is_some_and(|cell| cell.trim().is_empty()))
                 && table.buttons.first().and_then(|button| table.text.lines().nth(button.line)).is_some_and(|line| line.contains("[1]"))
                 && table.buttons.get(1).and_then(|button| table.text.lines().nth(button.line)).is_some_and(|line| line.contains("[2]"))));
     }
 
     #[test]
+    fn displays_all_readiness_values_only_on_the_first_line() {
+        use crate::model::Readiness;
+        let issues = [
+            Readiness::Yes,
+            Readiness::NeedsInformation,
+            Readiness::NeedsInvestigation,
+        ]
+        .map(|readiness| {
+            let mut issue = issue(42, "タイトル🙂", "本文\n続き");
+            issue.readiness = readiness;
+            issue
+        });
+        for width in [51, 80] {
+            let table = render_table_with_buttons(&issues, width, &Ok(BTreeSet::from([42])));
+            assert!(table.is_ok());
+            let Ok(table) = table else { return };
+            assert!(table.text.lines().all(|line| line.width() == width));
+            for (ranked, region) in issues.iter().zip(&table.issues) {
+                for (offset, line) in table
+                    .text
+                    .lines()
+                    .skip(region.lines.start)
+                    .take(region.lines.len())
+                    .enumerate()
+                {
+                    assert_eq!(
+                        line.split('│').nth(2).map(str::trim),
+                        Some(if offset == 0 {
+                            ranked.readiness.label()
+                        } else {
+                            ""
+                        })
+                    );
+                }
+            }
+            for button in &table.buttons {
+                assert_eq!(button.x_start, 44);
+                let cells = table
+                    .text
+                    .lines()
+                    .nth(button.line)
+                    .and_then(|line| line.split('│').nth(4));
+                assert_eq!(
+                    cells.map(|cell| cell.trim_end().width()),
+                    Some(button.x_end - button.x_start + 2)
+                );
+            }
+        }
+        assert!(matches!(
+            render_table(&issues, 50),
+            Err(DisplayError::TerminalWidthTooSmall { width: 50 })
+        ));
+    }
+
+    #[test]
     fn records_every_wrapped_button_fragment_as_a_clickable_region() {
         let rendered =
-            render_table_with_buttons(&[issue(42, "title", "body")], 29, &Ok(BTreeSet::new()));
+            render_table_with_buttons(&[issue(42, "title", "body")], 37, &Ok(BTreeSet::new()));
         assert!(matches!(rendered, Ok(table)
             if table.buttons.len() > 1
                 && table.buttons.iter().all(|button| button.issue_index == 0 && button.x_end >= button.x_start)
@@ -352,12 +433,12 @@ mod tests {
     fn sanitizes_control_characters_before_width_and_button_calculation() {
         let unsafe_input = issue(42, "title\u{1b}[31m", "line\r\t");
         let safe_input = issue(42, "title [31m", "line  ");
-        let unsafe_table = render_table_with_buttons(&[unsafe_input], 40, &Ok(BTreeSet::new()));
-        let safe_table = render_table_with_buttons(&[safe_input], 40, &Ok(BTreeSet::new()));
+        let unsafe_table = render_table_with_buttons(&[unsafe_input], 48, &Ok(BTreeSet::new()));
+        let safe_table = render_table_with_buttons(&[safe_input], 48, &Ok(BTreeSet::new()));
         assert!(
             matches!((unsafe_table, safe_table), (Ok(unsafe_table), Ok(safe_table))
             if !unsafe_table.text.chars().any(|character| character.is_control() && character != '\n')
-                && unsafe_table.text.lines().all(|line| line.width() == 40)
+                && unsafe_table.text.lines().all(|line| line.width() == 48)
                 && unsafe_table.buttons == safe_table.buttons
                 && unsafe_table.text.contains("title [31m")
                 && unsafe_table.text.contains("line  "))
@@ -371,7 +452,7 @@ mod tests {
             issue(42, "next", ""),
             issue(420, "last", ""),
         ];
-        for width in [29, 40, 80] {
+        for width in [37, 40, 80] {
             let table = render_table_with_buttons(&issues, width, &Ok(BTreeSet::from([4, 420])));
             assert!(table.is_ok());
             let Ok(table) = table else { return };
@@ -384,7 +465,7 @@ mod tests {
                         .lines()
                         .nth(region.lines.start)?
                         .split('│')
-                        .nth(2)
+                        .nth(3)
                 })
                 .collect::<Vec<_>>();
             assert_eq!(numbers, [" #4   🌿 ", " #42     ", " #420 🌿 "]);
@@ -414,7 +495,7 @@ mod tests {
                         .nth(region.lines.start)
                         .is_some_and(|line| line
                             .split('│')
-                            .nth(2)
+                            .nth(3)
                             .is_some_and(|cell| cell.contains('?')))
                 );
             }
@@ -445,7 +526,7 @@ mod tests {
                 issue(42, "タイトル│🙂", "本文\n\x1b[31m"),
                 issue(43, "next", "body"),
             ],
-            29,
+            37,
             &Ok(BTreeSet::new()),
         );
         assert!(table.is_ok());
@@ -456,14 +537,14 @@ mod tests {
             let highlighted = table.lines(Some(selected));
             for (line_index, (line, original)) in highlighted.iter().zip(&plain).enumerate() {
                 if region.lines.contains(&line_index) {
-                    assert_eq!(line.matches("\x1b[30;104m").count(), 3);
-                    assert_eq!(line.matches("\x1b[39;49m").count(), 3);
+                    assert_eq!(line.matches("\x1b[30;104m").count(), 4);
+                    assert_eq!(line.matches("\x1b[39;49m").count(), 4);
                     assert!(line.starts_with("│\x1b[30;104m "));
                     assert!(line.ends_with(" \x1b[39;49m│"));
-                    assert_eq!(line.matches("\x1b[39;49m│").count(), 3);
+                    assert_eq!(line.matches("\x1b[39;49m│").count(), 4);
                     let uncolored = line.replace("\x1b[30;104m", "").replace("\x1b[39;49m", "");
                     assert_eq!(&uncolored, original);
-                    assert_eq!(uncolored.width(), 29);
+                    assert_eq!(uncolored.width(), 37);
                 } else {
                     assert_eq!(line, original);
                 }

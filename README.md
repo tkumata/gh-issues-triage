@@ -72,7 +72,9 @@ cargo run -- gh-username/gh-reponame
 
 認証情報がない場合は Device Flow の確認 URL とコードを表示します。認証情報は macOS Keychain または Linux Secret Service に保存されます。保存済み access token が失効した場合は refresh token で自動更新し、refresh token がないか失効している場合だけ Device Flow を開始します。PAT と平文ファイルは使用しません。
 
-repository 指定では、GitHub の open Issue を新しい順に最大10件取得し、pull request を除外します。全 Issue を1回の TypeSafe Jev リクエストで重要度判定とブランチ名の分類を行い、端末幅に合わせた Unicode 対応テーブルで表示します。
+repository 指定では、GitHub の open Issue を新しい順に最大10件取得し、pull request を除外します。全 Issue を1回の TypeSafe Jev リクエストで重要度判定、ブランチ名の分類、着手可能度の判定を行い、端末幅に合わせた Unicode 対応テーブルで表示します。
+
+`Ready` 列は重要度とは独立した着手可能度を表示します。`Yes` は着手可能、`Needs information` は追加情報が必要、`Needs investigation` は実装前の技術調査が必要です。要求の具体性、必要な再現条件、完了条件、事前調査の必要性をタイトルと本文から判定します。情報不足と調査必要が重なる場合は情報不足を優先し、不具合以外には再現手順を必須にしません。Ready は重要度順やブランチ作成操作を変更しません。
 
 Issue 番号の右隣には、対象ローカルリポジトリのブランチ状態を表示します。`🌿` はブランチあり、空欄はブランチなし、`?` は確認不能です。`refactor` / `fix` / `feat` / `chore` / `docs` のいずれかの prefix を持つ `issue-<number>` を照合し、リモート上だけのブランチや独自命名のブランチは対象に含めません。root 未設定などで確認できない場合も、理由を示して一覧を表示します。この画面で作成に成功した後は、一覧へ戻る際に状態を更新します。
 
