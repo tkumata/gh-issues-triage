@@ -435,7 +435,7 @@ mod tests {
         let empty = render_table_with_buttons(&[], 40, &Err("root missing".into()));
         assert!(empty.is_ok());
         let Ok(empty) = empty else { return };
-        assert!(empty.branch_help.is_empty());
+        assert_eq!(empty.branch_help, [] as [String; 0]);
     }
 
     #[test]

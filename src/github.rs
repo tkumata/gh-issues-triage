@@ -227,7 +227,7 @@ mod tests {
         assert_eq!(issues.len(), MAX_ISSUES);
         let mut empty = Vec::new();
         append_github_issues(&mut empty, Vec::new());
-        assert!(empty.is_empty());
+        assert_eq!(empty, [] as [Issue; 0]);
     }
 
     #[test]
