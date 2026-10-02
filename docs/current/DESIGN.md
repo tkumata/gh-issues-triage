@@ -19,8 +19,8 @@ CLI 引数検証
      └─ 未保存・refresh token なし/失効時は Device Flow で認証して保存
           ↓
      GitHub REST API から最新 open Issue を最大10件取得
-      └─ 全 Issue を1回の Jev リクエストで Score 化
-          └─ Score を検証して安定ソート
+      └─ 全 Issue を1回の Jev リクエストで重要度・ブランチ分類・Ready 判定
+          └─ 全回答を検証して重要度順に安定ソート
               └─ 端末幅に合わせてテーブルを描画
 ```
 
@@ -32,7 +32,7 @@ CLI 引数検証
 | GitHub authentication | 保存済み token の利用、refresh、必要時の Device Flow、GitHub エラーの解釈 |
 | credential storage | OS の資格情報ストアを使った GitHub App user access token と refresh token の保存と読み込み |
 | GitHub issues | REST API ページング、pull request 除外、最大10件への制限 |
-| triage | Jev request の構築、Score 応答検証、安定ソート |
+| triage | Jev request の構築、Score・Choice 応答検証、安定ソート |
 | presentation | Unicode 表示幅に基づく折り返し、列幅配分、罫線描画 |
 
 実装時のファイル分割は責務が読みにくくならない最小単位とし、責務ごとのファイル作成を必須にしない。
@@ -42,7 +42,7 @@ CLI 引数検証
 ```text
 RepositoryRef { owner, repo }
 Issue { number, title, body, source_order }
-RankedIssue { issue, score }
+RankedIssue { issue, score, prefix, readiness }
 ```
 
 - 外部 API の応答型は必要なフィールドだけを deserialize する。
@@ -69,7 +69,7 @@ RankedIssue { issue, score }
 ### TypeSafe
 
 - Rust SDK は前提にせず、公式 HTTP endpoint を使用する。
-- structured state と Issue ごとの Score question を1リクエストにまとめる。
+- structured state と Issue ごとの Score・Choice question を1リクエストにまとめる。
 - question の5段階 criterion はアプリ側の仕様として固定し、返却された Score を独自変換しない。
 - 返却された answer の件数、type、有限数、許容範囲を検証してから使用する。
 
@@ -129,3 +129,29 @@ RankedIssue { issue, score }
 
 - `make check` 成功（43テスト）、`make build` 成功。ローカルブランチの照合、確認の副作用がないこと、確認不能の理由、3状態の位置と幅、折り返し、既存のクリック領域・仮選択の回帰を自動検証した。
 - 実端末での絵文字の表示幅・罫線・操作、および作成成功後に一覧へ戻ったときの状態更新は手動確認未実施。
+
+## 追加設計: 着手可能度（Ready）
+
+2026-10-02にユーザー承認済み。実装済みで、実端末の表示・操作確認は未実施。既存の責務分割とエラー方針を維持する。
+
+- `jev` は既存のリクエストへ Issue ごとの Ready `Choice` question を追加し、重要度・ブランチ分類・Ready の回答を同じ Issue に対応付ける。3つの判定は独立させ、外部 API の往復を追加しない。
+- 検証済みの判定を3値の `Readiness` として `RankedIssue` に保持する。API の選択肢と表示文字列は `Yes`、`Needs information`、`Needs investigation` に対応させる。未回答・不正回答を表す既定値は設けない。
+- `presentation` は渡された Ready を表示し、判定や API アクセスを行わない。既存の Unicode 幅計算、罫線、セル装飾、クリック領域と Issue 行範囲の計算を4列へ対応させる。
+- `main` から表示までの受け渡しは既存の `RankedIssue` を使用する。Ready の値を並べ替えやブランチ作成条件には使用しない。
+- 変更対象は既存の Jev 判定・結果型・表示と、その動作を確認するテストに限定する。新しいモジュール、汎用分類層、設定、依存関係、永続化は追加しない。
+- 実装対象は `src/jev.rs`、`src/model.rs`、`src/presentation.rs`。型変更に伴い `src/main.rs` と `src/branch.rs` のテストデータも更新する。変更後の結果型は `RankedIssue { issue, score, prefix, readiness }` とする。
+
+### 検証境界
+
+- リクエスト: 同じ state と1回のリクエストに3種の question が含まれ、Ready が対象 Issue のパスと4観点を参照することを確認する。
+- 応答: 3値の取得と Issue の対応付け、回答の欠落・型不正・未知の選択肢・不正な確率の拒否を確認する。Ready が異なる場合も重要度順と同順位の順序を維持する。
+- 表示と操作: 3つの文字列、0件、複数行、Unicode を含む Issue、端末幅不足、ハイライト、既存の番号右隣のブランチ状態、クリック・キー操作への対応を確認する。
+- 実装後は既定の `make check` と `make build` を使用する。文書更新だけの段階では実装検証の成功を記録しない。
+- 実 Jev の判定品質は自動応答テストと区別し、情報不足・事前調査・着手可能の代表例、不具合以外の再現条件不要の例、両方不足する例で手動確認する。モデル出力の確率的な性質を踏まえ、判定例を完全一致する単体テストとして扱わない。
+- 実端末で4列の幅・罫線・仮選択・ブランチ作成操作を確認し、自動検証と区別して記録する。
+
+### Ready 追加の確認結果（2026-10-02）
+
+- `make check` 成功（45テスト）、`make build` 成功。3値の対応付け、欠落・不正回答の拒否、確率検証、Ready に依存しない重要度順、4列の幅・表示・ハイライト・クリック領域、既存の選択操作とブランチ作成を自動検証した。
+- 実 Jev へ実装の Ready instructions と criteria を使って5例を1回送信し、情報不足、事前調査、具体的な文書修正、再現手順不要の機能追加、情報不足と調査必要の併存について、期待する3値と一致した。代表例の確認であり、判定品質全体を保証するものではない。
+- 実端末で4列の幅・罫線・仮選択・ブランチ作成操作を確認する手動検証は未実施。

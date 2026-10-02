@@ -219,6 +219,7 @@ mod tests {
             },
             score: 1.0,
             prefix: "fix".to_owned(),
+            readiness: crate::model::Readiness::NeedsInvestigation,
         };
         let reference = RepositoryRef {
             owner: "owner".into(),
@@ -295,6 +296,7 @@ mod tests {
             },
             score: 1.0,
             prefix: "docs".to_owned(),
+            readiness: crate::model::Readiness::NeedsInformation,
         };
         let enclosing_repo = temp.join("enclosing");
         fs::create_dir_all(enclosing_repo.join("repo"))?;
@@ -444,6 +446,7 @@ mod tests {
             },
             score: 1.0,
             prefix: "fix".to_owned(),
+            readiness: crate::model::Readiness::Yes,
         };
         let repository = RepositoryRef {
             owner: "owner".into(),
