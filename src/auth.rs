@@ -426,10 +426,4 @@ mod tests {
         let now = Instant::now();
         assert_eq!(poll_wait(now, now, Duration::from_secs(5)), None);
     }
-
-    #[test]
-    fn poll_wait_stops_at_deadline() {
-        let now = Instant::now();
-        assert_eq!(poll_wait(now, now, Duration::from_secs(5)), None);
-    }
 }
