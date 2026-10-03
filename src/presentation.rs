@@ -91,10 +91,6 @@ pub(crate) fn terminal_height() -> Result<usize, DisplayError> {
     Err(DisplayError::TerminalWidthUnavailable)
 }
 
-fn score_label(score: f64) -> String {
-    format!("{score}")
-}
-
 pub(crate) fn wrap_line(line: &str, width: usize) -> Vec<String> {
     if line.is_empty() {
         return vec![String::new()];
@@ -164,7 +160,7 @@ fn render_table(issues: &[RankedIssue], width: usize) -> Result<String, DisplayE
 fn table_widths(issues: &[RankedIssue], width: usize) -> Result<[usize; 4], DisplayError> {
     let importance_width = issues
         .iter()
-        .map(|issue| score_label(issue.score).width())
+        .map(|issue| issue.score.to_string().width())
         .max()
         .unwrap_or(0)
         .max("重要度".width());
@@ -247,7 +243,7 @@ pub(crate) fn render_table_with_buttons(
             let wrapped_lines = wrap_line(&content_line, widths[3]);
             for wrapped in &wrapped_lines {
                 let importance = if issue_line_index == 0 {
-                    score_label(ranked.score)
+                    ranked.score.to_string()
                 } else {
                     String::new()
                 };

@@ -418,19 +418,7 @@ fn visible_lines(lines: &[String], scroll: usize, rows: usize) -> Vec<&str> {
 fn wrap_message(message: &str, width: usize) -> Vec<String> {
     message
         .lines()
-        .flat_map(|line| {
-            let safe_line = line
-                .chars()
-                .map(|character| {
-                    if character.is_control() {
-                        ' '
-                    } else {
-                        character
-                    }
-                })
-                .collect::<String>();
-            wrap_line(&safe_line, width)
-        })
+        .flat_map(|line| wrap_line(line, width))
         .collect()
 }
 
