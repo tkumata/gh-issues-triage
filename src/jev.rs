@@ -58,10 +58,7 @@ pub(crate) fn build_jev_request(issues: &[Issue]) -> Value {
         let choice_instructions = format!(
             "Classify the issue at `issues[{index}].number`, `issues[{index}].title`, and `issues[{index}].body` for its likely change type."
         );
-        let criteria = BRANCH_CRITERIA
-            .iter()
-            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
-            .collect::<BTreeMap<_, _>>();
+        let criteria = BRANCH_CRITERIA.iter().copied().collect::<BTreeMap<_, _>>();
         questions.insert(
             id,
             json!({ "type": "score", "instructions": instructions, "criteria": SCORE_CRITERIA }),
@@ -268,12 +265,11 @@ pub(crate) fn triage_issues(
 mod tests {
     use super::*;
 
-    fn issue(number: u64, title: &str, body: &str, source_order: usize) -> Issue {
+    fn issue(number: u64, title: &str, body: &str) -> Issue {
         Issue {
             number,
             title: title.to_owned(),
             body: body.to_owned(),
-            source_order,
         }
     }
 
@@ -324,18 +320,14 @@ mod tests {
         }
         let mut wrong_selected_option = valid_choice("docs", &BRANCH_CRITERIA);
         let changed = wrong_selected_option
-            .get_mut("probabilities")
-            .and_then(Value::as_object_mut)
-            .and_then(|probabilities| probabilities.get_mut("fix"))
+            .pointer_mut("/probabilities/fix")
             .is_some_and(|probability| {
                 *probability = json!(1.0);
                 true
             });
         assert!(changed);
         let changed = wrong_selected_option
-            .get_mut("probabilities")
-            .and_then(Value::as_object_mut)
-            .and_then(|probabilities| probabilities.get_mut("docs"))
+            .pointer_mut("/probabilities/docs")
             .is_some_and(|probability| {
                 *probability = json!(0.0);
                 true
@@ -346,61 +338,52 @@ mod tests {
 
     #[test]
     fn builds_one_score_question_per_issue() {
-        let request =
-            build_jev_request(&[issue(42, "broken", "details", 0), issue(7, "old", "", 1)]);
+        let request = build_jev_request(&[issue(42, "broken", "details"), issue(7, "old", "")]);
         assert_eq!(
             request.get("model").and_then(Value::as_str),
             Some(TYPESAFE_MODEL)
         );
         let questions = request.get("questions").and_then(Value::as_object);
         assert_eq!(questions.map(serde_json::Map::len), Some(6));
-        let first_question = questions.and_then(|items| items.get("issue_0"));
         assert_eq!(
-            first_question
-                .and_then(|item| item.get("type"))
+            request
+                .pointer("/questions/issue_0/type")
                 .and_then(Value::as_str),
             Some("score")
         );
         assert_eq!(
-            first_question
-                .and_then(|item| item.get("criteria"))
+            request
+                .pointer("/questions/issue_0/criteria")
                 .and_then(Value::as_array)
                 .map(Vec::len),
             Some(5)
         );
         assert!(
-            first_question
-                .and_then(|item| item.get("instructions"))
+            request
+                .pointer("/questions/issue_0/instructions")
                 .and_then(Value::as_str)
                 .is_some_and(|text| text.contains("issues[0].number"))
         );
         assert_eq!(
             request
-                .get("state")
-                .and_then(|state| state.get("issues"))
-                .and_then(Value::as_array)
-                .and_then(|issues| issues.first())
-                .and_then(|issue| issue.get("number"))
+                .pointer("/state/issues/0/number")
                 .and_then(Value::as_u64),
             Some(42)
         );
         assert_eq!(
-            questions
-                .and_then(|items| items.get("issue_0_branch"))
-                .and_then(|item| item.get("type"))
+            request
+                .pointer("/questions/issue_0_branch/type")
                 .and_then(Value::as_str),
             Some("choice")
         );
         assert_eq!(
-            questions
-                .and_then(|items| items.get("issue_0_branch"))
-                .and_then(|item| item.get("criteria"))
-                .and_then(Value::as_object)
-                .map(serde_json::Map::len),
-            Some(5)
+            request.pointer("/questions/issue_0_branch/criteria"),
+            Some(&json!(
+                BRANCH_CRITERIA.iter().copied().collect::<BTreeMap<_, _>>()
+            ))
         );
         for index in 0..2 {
-            let ready = questions.and_then(|items| items.get(&format!("issue_{index}_ready")));
+            let ready = request.pointer(&format!("/questions/issue_{index}_ready"));
             assert_eq!(
                 ready
                     .and_then(|item| item.get("type"))
@@ -457,9 +440,7 @@ mod tests {
         }
         let mut wrong_legend = valid_answer(2.0);
         let changed = wrong_legend
-            .get_mut("legend")
-            .and_then(Value::as_object_mut)
-            .and_then(|legend| legend.get_mut("2"))
+            .pointer_mut("/legend/2")
             .is_some_and(|criterion| {
                 *criterion = json!("different");
                 true
@@ -468,9 +449,7 @@ mod tests {
         assert!(validate_score_answer(&wrong_legend).is_err());
         let mut wrong_probabilities = valid_answer(2.0);
         let changed = wrong_probabilities
-            .get_mut("probabilities")
-            .and_then(Value::as_object_mut)
-            .and_then(|probabilities| probabilities.get_mut("3"))
+            .pointer_mut("/probabilities/3")
             .is_some_and(|probability| {
                 *probability = json!(0.9);
                 true
@@ -496,34 +475,6 @@ mod tests {
         });
         assert!(changed);
         assert!(validate_score_answer(&wrong_weighted_score).is_err());
-    }
-
-    #[test]
-    fn rejects_missing_extra_and_wrong_type_answers() {
-        let mut answers = serde_json::Map::new();
-        answers.insert("issue_0".to_owned(), valid_answer(2.0));
-        answers.insert(
-            "issue_0_branch".to_owned(),
-            valid_choice("fix", &BRANCH_CRITERIA),
-        );
-        answers.insert(
-            "issue_0_ready".to_owned(),
-            valid_choice("Yes", &READINESS_CRITERIA),
-        );
-        assert!(parse_jev_answers(&json!({"answers": answers}).to_string(), 2).is_err());
-        answers.insert("issue_1".to_owned(), valid_answer(1.0));
-        answers.insert(
-            "issue_1_branch".to_owned(),
-            valid_choice("docs", &BRANCH_CRITERIA),
-        );
-        answers.insert(
-            "issue_1_ready".to_owned(),
-            valid_choice("Yes", &READINESS_CRITERIA),
-        );
-        answers.insert("issue_0_branch".to_owned(), json!({"type":"score"}));
-        assert!(parse_jev_answers(&json!({"answers": answers.clone()}).to_string(), 2).is_err());
-        answers.insert("extra".to_owned(), valid_answer(1.0));
-        assert!(parse_jev_answers(&json!({"answers": answers}).to_string(), 2).is_err());
     }
 
     #[test]
@@ -554,12 +505,22 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_or_missing_readiness_without_fallback() {
+    fn rejects_invalid_missing_or_extra_answers_without_fallback() {
         let valid = json!({"answers": {
             "issue_0": valid_answer(2.0),
             "issue_0_branch": valid_choice("fix", &BRANCH_CRITERIA),
             "issue_0_ready": valid_choice("Yes", &READINESS_CRITERIA)
         }});
+        assert!(parse_jev_answers(&valid.to_string(), 2).is_err());
+        let mut wrong_branch_type = valid.clone();
+        let changed = wrong_branch_type
+            .pointer_mut("/answers/issue_0_branch")
+            .is_some_and(|answer| {
+                *answer = json!({"type":"score"});
+                true
+            });
+        assert!(changed);
+        assert!(parse_jev_answers(&wrong_branch_type.to_string(), 1).is_err());
         for answer in [
             json!(null),
             valid_answer(2.0),

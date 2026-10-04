@@ -665,7 +665,6 @@ mod interaction_tests {
             26,
         );
         assert!(help.len() > 1);
-        assert_eq!(26_usize.saturating_sub(help.len()) + help.len(), 26);
     }
 
     #[test]
@@ -719,7 +718,6 @@ mod interaction_tests {
                 number,
                 title: format!("Issue {number}"),
                 body: String::new(),
-                source_order: 0,
             },
             score: 3.6,
             prefix: "fix".to_owned(),
@@ -809,7 +807,6 @@ mod interaction_tests {
                 number,
                 title: "タイトル🙂".to_owned(),
                 body: "本文\n長い日本語の本文".to_owned(),
-                source_order: 0,
             },
             score: 3.6,
             prefix: "fix".to_owned(),

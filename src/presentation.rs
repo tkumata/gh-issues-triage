@@ -314,7 +314,6 @@ mod tests {
                 number,
                 title: title.to_owned(),
                 body: body.to_owned(),
-                source_order: 0,
             },
             score: 3.6,
             prefix: "fix".to_owned(),
