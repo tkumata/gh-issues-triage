@@ -82,7 +82,6 @@ pub(crate) struct Issue {
     pub(crate) number: u64,
     pub(crate) title: String,
     pub(crate) body: String,
-    pub(crate) source_order: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -112,7 +111,6 @@ pub(crate) fn rank_issues(
             .score
             .partial_cmp(&left.score)
             .unwrap_or(Ordering::Equal)
-            .then_with(|| left.issue.source_order.cmp(&right.issue.source_order))
     });
     ranked
 }
@@ -122,26 +120,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stable_sort_keeps_source_order_for_equal_scores() {
+    fn stable_sort_keeps_input_order_for_equal_scores() {
         let ranked = rank_issues(
             vec![
                 Issue {
-                    number: 1,
+                    number: 42,
                     title: "first".to_owned(),
                     body: String::new(),
-                    source_order: 0,
                 },
                 Issue {
-                    number: 2,
+                    number: 7,
                     title: "second".to_owned(),
                     body: String::new(),
-                    source_order: 1,
                 },
                 Issue {
                     number: 3,
                     title: "third".to_owned(),
                     body: String::new(),
-                    source_order: 2,
                 },
             ],
             vec![
@@ -166,7 +161,7 @@ mod tests {
                 .iter()
                 .map(|item| item.issue.number)
                 .collect::<Vec<_>>(),
-            vec![2, 1, 3]
+            vec![7, 42, 3]
         );
     }
 }

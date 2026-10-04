@@ -99,7 +99,6 @@ fn append_github_issues(issues: &mut Vec<Issue>, page_items: Vec<GithubIssueResp
             number: item.number,
             title: item.title,
             body: item.body.unwrap_or_default(),
-            source_order: issues.len(),
         });
     }
 }
@@ -209,11 +208,8 @@ mod tests {
             }],
         );
         assert_eq!(
-            issues
-                .iter()
-                .map(|issue| issue.source_order)
-                .collect::<Vec<_>>(),
-            [0, 1]
+            issues.iter().map(|issue| issue.number).collect::<Vec<_>>(),
+            [2, 3]
         );
         let ten = (0..12)
             .map(|number| GithubIssueResponse {

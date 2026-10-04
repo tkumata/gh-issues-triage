@@ -69,12 +69,12 @@
 
 ```text
 RepositoryRef { owner, repo }
-Issue { number, title, body, source_order }
+Issue { number, title, body }
 RankedIssue { issue, score, prefix, readiness }
 ```
 
 - 応答型のデシリアライズでは、アプリケーションは使用するフィールドだけを対象にする。
-- アプリケーションは、同順位の取得順を保持するために `source_order` を使用する。
+- アプリケーションは、Issue を取得順で保持し、同順位の取得順を安定ソートで維持する。
 - アプリケーションは、`score`、`confidence`、`probabilities` を応答検証に使用する。
 - アプリケーションは、検証済みの `score` を表示と並べ替えに使用する。
 - アプリケーションは、検証済みの `score` を変換しない。

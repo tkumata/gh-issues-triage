@@ -4,16 +4,11 @@ use serde::{Deserialize, Serialize};
 const CREDENTIAL_SERVICE: &str = "gh-issues-triage";
 const CREDENTIAL_USERNAME: &str = "github.com";
 
+#[derive(Serialize, Deserialize)]
 pub(crate) struct Credentials {
     pub(crate) access_token: String,
-    pub(crate) refresh_token: Option<String>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct StoredCredentials {
-    access_token: String,
     #[serde(default)]
-    refresh_token: Option<String>,
+    pub(crate) refresh_token: Option<String>,
 }
 
 #[derive(Debug)]
@@ -63,11 +58,7 @@ pub(crate) fn save_credentials(credentials: &Credentials) -> Result<(), Credenti
     {
         return Err(CredentialError::InvalidResponse);
     }
-    let value = serde_json::to_string(&StoredCredentials {
-        access_token: credentials.access_token.clone(),
-        refresh_token: credentials.refresh_token.clone(),
-    })
-    .map_err(|_| CredentialError::InvalidResponse)?;
+    let value = serde_json::to_string(credentials).map_err(|_| CredentialError::InvalidResponse)?;
     entry()?
         .set_password(&value)
         .map_err(|_| CredentialError::CredentialWriteFailed)
@@ -83,17 +74,14 @@ pub(crate) fn load_credentials() -> Result<Credentials, CredentialError> {
 
 fn parse_credentials(value: &str) -> Result<Credentials, CredentialError> {
     if value.trim_start().starts_with('{') {
-        let stored = serde_json::from_str::<StoredCredentials>(value)
+        let stored = serde_json::from_str::<Credentials>(value)
             .map_err(|_| CredentialError::CredentialReadFailed)?;
         if stored.access_token.is_empty()
             || stored.refresh_token.as_ref().is_some_and(String::is_empty)
         {
             return Err(CredentialError::CredentialReadFailed);
         }
-        return Ok(Credentials {
-            access_token: stored.access_token,
-            refresh_token: stored.refresh_token,
-        });
+        return Ok(stored);
     }
     // Values saved by earlier versions contain only the access token.
     Ok(Credentials {
@@ -140,6 +128,35 @@ mod tests {
             Ok(Credentials { access_token, refresh_token: Some(refresh_token) })
                 if access_token == "gho_access" && refresh_token == "ghr_refresh"
         ));
+        for value in [
+            r#"{"access_token":"gho_access"}"#,
+            r#"{"access_token":"gho_access","refresh_token":null}"#,
+        ] {
+            assert!(matches!(
+                parse_credentials(value),
+                Ok(Credentials { access_token, refresh_token: None }) if access_token == "gho_access"
+            ));
+        }
+    }
+
+    #[test]
+    fn preserves_stored_json_format() {
+        for (refresh_token, expected) in [
+            (
+                Some("ghr_refresh"),
+                r#"{"access_token":"gho_access","refresh_token":"ghr_refresh"}"#,
+            ),
+            (
+                None,
+                r#"{"access_token":"gho_access","refresh_token":null}"#,
+            ),
+        ] {
+            let credentials = Credentials {
+                access_token: "gho_access".to_owned(),
+                refresh_token: refresh_token.map(str::to_owned),
+            };
+            assert!(serde_json::to_string(&credentials).is_ok_and(|value| value == expected));
+        }
     }
 
     #[test]

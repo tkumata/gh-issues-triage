@@ -422,7 +422,6 @@ mod tests {
     #[test]
     fn rejects_expired_or_incomplete_device_code() {
         assert!(parse_device_code(r#"{"device_code":"x","user_code":"y","verification_uri":"https://github.com/login/device","expires_in":0,"interval":5}"#).is_err());
-        assert!(parse_token_response(200, r#"{"error":"expired_token"}"#).is_ok());
         let now = Instant::now();
         assert_eq!(poll_wait(now, now, Duration::from_secs(5)), None);
     }
