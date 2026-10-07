@@ -545,7 +545,7 @@ refs/heads/<prefix>/issue-<number>
 本節の規定は、必須 (MUST) とする。
 本節は `next` にだけ適用する。
 
-### CLI
+### CLI: 次に着手する Issue の JSON 出力
 
 ```text
 gh-issues-triage next <owner>/<repo> --format json
