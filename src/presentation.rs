@@ -2,7 +2,24 @@ use std::collections::BTreeSet;
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::model::RankedIssue;
+use crate::model::{RankedIssue, RepositoryRef};
+
+pub(crate) fn render_next_json(
+    repository: &RepositoryRef,
+    selected: Option<&RankedIssue>,
+) -> Result<String, serde_json::Error> {
+    let value = selected.map(|ranked| {
+        serde_json::json!({
+            "repository": format!("{}/{}", repository.owner, repository.repo),
+            "number": ranked.issue.number,
+            "title": ranked.issue.title,
+            "body": ranked.issue.body,
+            "score": ranked.score,
+            "readiness": ranked.readiness.label(),
+        })
+    });
+    serde_json::to_string(&value)
+}
 
 #[derive(Debug)]
 pub(crate) enum DisplayError {
@@ -307,6 +324,33 @@ fn branch_help(branches: &Result<BTreeSet<u64>, String>, width: usize) -> Vec<St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn renders_json_without_terminal_sanitizing_or_score_rounding() {
+        let repository = RepositoryRef {
+            owner: "owner".into(),
+            repo: "repo".into(),
+        };
+        for body in ["", "本文\n\"引用\"\t\u{1b}"] {
+            let mut ranked = issue(42, "タイトル🙂", body);
+            ranked.score = 3.612_345;
+            let output = render_next_json(&repository, Some(&ranked));
+            assert!(output.is_ok());
+            let Ok(output) = output else { return };
+            assert!(!output.chars().any(char::is_control));
+            let expected = serde_json::json!({
+                "repository": "owner/repo",
+                "number": 42,
+                "title": "タイトル🙂",
+                "body": body,
+                "score": 3.612_345,
+                "readiness": "Yes",
+            });
+            assert!(matches!(serde_json::from_str::<serde_json::Value>(&output),
+                Ok(value) if value == expected));
+        }
+        assert!(matches!(render_next_json(&repository, None), Ok(output) if output == "null"));
+    }
 
     fn issue(number: u64, title: &str, body: &str) -> RankedIssue {
         RankedIssue {

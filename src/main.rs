@@ -23,10 +23,10 @@ use cli::{Command, USAGE, parse_args};
 use credentials::CredentialError;
 use github::{GithubError, fetch_issues};
 use jev::{JevError, triage_issues, typesafe_api_key};
-use model::RepositoryRef;
+use model::{RankedIssue, RepositoryRef, next_ready_issue};
 use presentation::{
-    ButtonRegion, DisplayError, RenderedTable, render_table_with_buttons, terminal_height,
-    terminal_width, wrap_line,
+    ButtonRegion, DisplayError, RenderedTable, render_next_json, render_table_with_buttons,
+    terminal_height, terminal_width, wrap_line,
 };
 
 const USER_AGENT: &str = "gh-issues-triage/0.1.0";
@@ -39,6 +39,8 @@ enum AppError {
     Github(GithubError),
     Jev(JevError),
     Display(DisplayError),
+    Json(serde_json::Error),
+    Output(io::Error),
     Interaction(String),
 }
 
@@ -76,6 +78,8 @@ impl Display for AppError {
             Self::Github(error) => Display::fmt(error, formatter),
             Self::Jev(error) => Display::fmt(error, formatter),
             Self::Display(error) => Display::fmt(error, formatter),
+            Self::Json(error) => write!(formatter, "cannot serialize JSON: {error}"),
+            Self::Output(error) => write!(formatter, "cannot write output: {error}"),
             Self::Interaction(error) => formatter.write_str(error),
         }
     }
@@ -89,14 +93,20 @@ fn http_client() -> Result<Client, AuthError> {
         .map_err(|_| AuthError::HttpRequest { timeout: false })
 }
 
-fn device_authorize(client: &Client) -> Result<credentials::Credentials, AppError> {
+fn device_authorize(
+    client: &Client,
+    notice: &mut impl Write,
+) -> Result<credentials::Credentials, AppError> {
     credentials::ensure_available()?;
     let client_id = auth::client_id()?;
     let device = auth::request_device_code(client, &client_id)?;
-    println!(
+    writeln!(
+        notice,
         "Open {} and enter code {}",
         device.verification_uri, device.user_code
-    );
+    )
+    .map_err(AppError::Output)?;
+    notice.flush().map_err(AppError::Output)?;
     let tokens = auth::poll_access_token(client, &client_id, &device)?;
     let credentials = credentials::Credentials {
         access_token: tokens.access_token,
@@ -105,7 +115,10 @@ fn device_authorize(client: &Client) -> Result<credentials::Credentials, AppErro
     Ok(credentials)
 }
 
-fn run_repository(repository: &RepositoryRef) -> Result<(), AppError> {
+fn load_ranked_issues(
+    repository: &RepositoryRef,
+    notice: &mut impl Write,
+) -> Result<Vec<RankedIssue>, AppError> {
     let client = http_client()?;
     let stored = match credentials::load_credentials() {
         Ok(credentials) => Some(credentials),
@@ -115,7 +128,7 @@ fn run_repository(repository: &RepositoryRef) -> Result<(), AppError> {
     let stored = if let Some(credentials) = stored {
         credentials
     } else {
-        let credentials = device_authorize(&client)?;
+        let credentials = device_authorize(&client, notice)?;
         credentials::save_credentials(&credentials)?;
         credentials
     };
@@ -130,23 +143,27 @@ fn run_repository(repository: &RepositoryRef) -> Result<(), AppError> {
                         refresh_token: tokens.refresh_token,
                     },
                     Err(AuthError::Failure(auth::AuthFailure::BadRefreshToken)) => {
-                        device_authorize(&client)?
+                        device_authorize(&client, notice)?
                     }
                     Err(error) => return Err(error.into()),
                 }
             } else {
-                device_authorize(&client)?
+                device_authorize(&client, notice)?
             };
             credentials::save_credentials(&refreshed)?;
             fetch_issues(&client, &refreshed.access_token, repository)?
         }
         Err(error) => return Err(error.into()),
     };
-    let ranked = if issues.is_empty() {
-        triage_issues(&client, "", issues)?
+    if issues.is_empty() {
+        Ok(triage_issues(&client, "", issues)?)
     } else {
-        triage_issues(&client, &typesafe_api_key()?, issues)?
-    };
+        Ok(triage_issues(&client, &typesafe_api_key()?, issues)?)
+    }
+}
+
+fn run_repository(repository: &RepositoryRef) -> Result<(), AppError> {
+    let ranked = load_ranked_issues(repository, &mut io::stdout())?;
     let width = terminal_width()?;
     let branches = if ranked.is_empty() {
         Ok(BTreeSet::new())
@@ -160,6 +177,21 @@ fn run_repository(repository: &RepositoryRef) -> Result<(), AppError> {
         run_branch_actions(repository, &ranked, table, width).map_err(AppError::Interaction)?;
     }
     Ok(())
+}
+
+fn write_next_json(
+    repository: &RepositoryRef,
+    ranked: &[RankedIssue],
+    output: &mut impl Write,
+) -> Result<(), AppError> {
+    let json = render_next_json(repository, next_ready_issue(ranked)).map_err(AppError::Json)?;
+    writeln!(output, "{json}").map_err(AppError::Output)?;
+    output.flush().map_err(AppError::Output)
+}
+
+fn run_next(repository: &RepositoryRef) -> Result<(), AppError> {
+    let ranked = load_ranked_issues(repository, &mut io::stderr())?;
+    write_next_json(repository, &ranked, &mut io::stdout().lock())
 }
 
 struct TerminalMode {
@@ -558,6 +590,7 @@ fn main() {
             return;
         }
         Command::Repository(repository) => run_repository(&repository),
+        Command::Next(repository) => run_next(&repository),
         Command::SetRoot(root) => branch::set_root(&root).map_err(AppError::Interaction),
     };
     if let Err(reason) = result {
@@ -570,6 +603,42 @@ fn main() {
 mod interaction_tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn writes_next_json_to_a_non_terminal_and_propagates_write_errors() {
+        let repository = RepositoryRef {
+            owner: "owner".into(),
+            repo: "repo".into(),
+        };
+        let ranked = model::rank_issues(
+            vec![model::Issue {
+                number: 42,
+                title: "title".into(),
+                body: String::new(),
+            }],
+            vec![(3.6, "fix".into(), model::Readiness::Yes)],
+        );
+        let mut output = Vec::new();
+        assert!(write_next_json(&repository, &ranked, &mut output).is_ok());
+        assert!(
+            output
+                .strip_suffix(b"\n")
+                .is_some_and(|json| !json.contains(&b'\n'))
+        );
+        assert!(
+            matches!(serde_json::from_slice::<serde_json::Value>(&output),
+            Ok(value) if value.get("number") == Some(&serde_json::json!(42))
+                && value.get("repository") == Some(&serde_json::json!("owner/repo")))
+        );
+        let mut empty = Vec::new();
+        assert!(write_next_json(&repository, &[], &mut empty).is_ok());
+        assert_eq!(empty, b"null\n");
+        let mut full = &mut [][..];
+        assert!(matches!(
+            write_next_json(&repository, &ranked, &mut full),
+            Err(AppError::Output(error)) if error.kind() == io::ErrorKind::WriteZero
+        ));
+    }
 
     #[test]
     fn keyboard_mouse_bounds_escape_sequences_and_restore_controls() {

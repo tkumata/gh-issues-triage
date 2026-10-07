@@ -22,15 +22,15 @@ pub(crate) const BRANCH_CRITERIA: [(&str, &str); 5] = [
 pub(crate) const READINESS_CRITERIA: [(&str, &str); 3] = [
     (
         "Yes",
-        "Requirements and completion criteria are clear, reproduction conditions are sufficient when applicable, and no missing information or prerequisite investigation blocks implementation.",
+        "A concrete desired behavior or concrete observed problem is described, so an issue-specific requirements outline can be written without inventing the central behavior or domain rule. Details of that already identified behavior may remain Open Questions, including exact fields, completion criteria, reproduction steps, cause, implementation approach, and feasibility.",
     ),
     (
         "Needs information",
-        "Requirements, completion criteria, or applicable reproduction conditions are missing or unclear; information from the reporter or requester is needed. Prefer this over Needs investigation when both apply.",
+        "Only a topic or generic wish is given, or an essential behavior or domain rule defining what the requested feature does is missing. Clarification is needed to avoid inventing the requirements. For a checker, merely naming dependencies does not say what should be detected or considered a violation. A list of questions or generic research plan alone is insufficient. Prefer this when information and investigation both block drafting.",
     ),
     (
         "Needs investigation",
-        "Requirements, completion criteria, and applicable reproduction conditions are sufficient, but technical investigation of cause, impact, or feasibility is needed before implementation.",
+        "The concrete intended behavior or problem is known, but factual investigation is indispensable before specification drafting can begin. Ordinary code inspection, identifying a bug cause, or research recordable during drafting does not qualify.",
     ),
 ];
 
@@ -92,6 +92,12 @@ pub(crate) struct RankedIssue {
     pub(crate) readiness: Readiness,
 }
 
+pub(crate) fn next_ready_issue(ranked: &[RankedIssue]) -> Option<&RankedIssue> {
+    ranked
+        .iter()
+        .find(|issue| issue.readiness == Readiness::Yes)
+}
+
 pub(crate) fn rank_issues(
     issues: Vec<Issue>,
     scores: Vec<(f64, String, Readiness)>,
@@ -118,6 +124,36 @@ pub(crate) fn rank_issues(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn next_ready_uses_importance_then_input_order_and_handles_no_candidate() {
+        let ranked = rank_issues(
+            (1..=5)
+                .map(|number| Issue {
+                    number,
+                    title: String::new(),
+                    body: String::new(),
+                })
+                .collect(),
+            vec![
+                (4.0, "fix".into(), Readiness::NeedsInformation),
+                (3.9, "fix".into(), Readiness::NeedsInvestigation),
+                (1.0, "feat".into(), Readiness::Yes),
+                (3.6, "fix".into(), Readiness::Yes),
+                (3.6, "docs".into(), Readiness::Yes),
+            ],
+        );
+        assert_eq!(
+            next_ready_issue(&ranked).map(|item| item.issue.number),
+            Some(4)
+        );
+        let not_ready = ranked
+            .into_iter()
+            .filter(|item| item.readiness != Readiness::Yes)
+            .collect::<Vec<_>>();
+        assert!(next_ready_issue(&not_ready).is_none());
+        assert!(next_ready_issue(&[]).is_none());
+    }
 
     #[test]
     fn stable_sort_keeps_input_order_for_equal_scores() {
