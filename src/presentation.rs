@@ -16,6 +16,7 @@ pub(crate) fn render_next_json(
             "body": ranked.issue.body,
             "score": ranked.score,
             "readiness": ranked.readiness.label(),
+            "branch_name": crate::branch::branch_name(ranked),
         })
     });
     serde_json::to_string(&value)
@@ -332,22 +333,32 @@ mod tests {
             repo: "repo".into(),
         };
         for body in ["", "本文\n\"引用\"\t\u{1b}"] {
-            let mut ranked = issue(42, "タイトル🙂", body);
-            ranked.score = 3.612_345;
-            let output = render_next_json(&repository, Some(&ranked));
-            assert!(output.is_ok());
-            let Ok(output) = output else { return };
-            assert!(!output.chars().any(char::is_control));
-            let expected = serde_json::json!({
-                "repository": "owner/repo",
-                "number": 42,
-                "title": "タイトル🙂",
-                "body": body,
-                "score": 3.612_345,
-                "readiness": "Yes",
-            });
-            assert!(matches!(serde_json::from_str::<serde_json::Value>(&output),
-                Ok(value) if value == expected));
+            for (prefix, branch_name) in [
+                ("refactor", "refactor/issue-42"),
+                ("fix", "fix/issue-42"),
+                ("feat", "feat/issue-42"),
+                ("chore", "chore/issue-42"),
+                ("docs", "docs/issue-42"),
+            ] {
+                let mut ranked = issue(42, "タイトル🙂", body);
+                ranked.score = 3.612_345;
+                ranked.prefix = prefix.to_owned();
+                let output = render_next_json(&repository, Some(&ranked));
+                assert!(output.is_ok());
+                let Ok(output) = output else { return };
+                assert!(!output.chars().any(char::is_control));
+                let expected = serde_json::json!({
+                    "repository": "owner/repo",
+                    "number": 42,
+                    "title": "タイトル🙂",
+                    "body": body,
+                    "score": 3.612_345,
+                    "readiness": "Yes",
+                    "branch_name": branch_name,
+                });
+                assert!(matches!(serde_json::from_str::<serde_json::Value>(&output),
+                    Ok(value) if value == expected));
+            }
         }
         assert!(matches!(render_next_json(&repository, None), Ok(output) if output == "null"));
     }
