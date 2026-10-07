@@ -560,6 +560,8 @@ refs/heads/<prefix>/issue-<number>
 本節は `next` にだけ適用する。
 ユーザーは2026-10-08に `branch_name` の追加仕様を承認した。
 `branch_name` の追加仕様は実装済みである。
+ユーザーは2026-10-08に実機確認を報告した。
+ユーザーの指示により、`branch_name` の追加を完了とする。
 
 ### CLI: 次に着手する Issue の JSON 出力
 
