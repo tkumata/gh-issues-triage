@@ -92,6 +92,12 @@ pub(crate) struct RankedIssue {
     pub(crate) readiness: Readiness,
 }
 
+pub(crate) fn next_ready_issue(ranked: &[RankedIssue]) -> Option<&RankedIssue> {
+    ranked
+        .iter()
+        .find(|issue| issue.readiness == Readiness::Yes)
+}
+
 pub(crate) fn rank_issues(
     issues: Vec<Issue>,
     scores: Vec<(f64, String, Readiness)>,
@@ -118,6 +124,36 @@ pub(crate) fn rank_issues(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn next_ready_uses_importance_then_input_order_and_handles_no_candidate() {
+        let ranked = rank_issues(
+            (1..=5)
+                .map(|number| Issue {
+                    number,
+                    title: String::new(),
+                    body: String::new(),
+                })
+                .collect(),
+            vec![
+                (4.0, "fix".into(), Readiness::NeedsInformation),
+                (3.9, "fix".into(), Readiness::NeedsInvestigation),
+                (1.0, "feat".into(), Readiness::Yes),
+                (3.6, "fix".into(), Readiness::Yes),
+                (3.6, "docs".into(), Readiness::Yes),
+            ],
+        );
+        assert_eq!(
+            next_ready_issue(&ranked).map(|item| item.issue.number),
+            Some(4)
+        );
+        let not_ready = ranked
+            .into_iter()
+            .filter(|item| item.readiness != Readiness::Yes)
+            .collect::<Vec<_>>();
+        assert!(next_ready_issue(&not_ready).is_none());
+        assert!(next_ready_issue(&[]).is_none());
+    }
 
     #[test]
     fn stable_sort_keeps_input_order_for_equal_scores() {
