@@ -66,8 +66,10 @@ cargo run -- next owner/repo --format json
 標準出力は、末尾に改行を付けた単一行の JSON です。
 
 ```json
-{"repository":"owner/repo","number":42,"title":"保存処理の修正","body":"再現条件と完了条件。","score":3.6,"readiness":"Yes"}
+{"repository":"owner/repo","number":42,"title":"保存処理の修正","body":"再現条件と完了条件。","score":3.6,"readiness":"Yes","branch_name":"fix/issue-42"}
 ```
+
+`branch_name` は、選択した Issue の分類と番号から既存の命名規則で生成した候補1件です。ブランチの存在や作成可否は確認しません。既存6項目は維持しますが、JSON のキー全体を厳密に照合する利用側は期待値の更新が必要です。
 
 本文なしは空文字で返します。重要度は丸めません。該当する Issue がない場合は `null` を返し、終了コード `0` で終了します。入力不正は終了コード `2`、認証・取得・判定・出力の失敗は終了コード `1` です。失敗を `null` へ置き換えません。
 

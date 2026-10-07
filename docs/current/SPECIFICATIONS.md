@@ -16,6 +16,8 @@
 - 実端末での Ready の表示確認は実施済みである。
 - 実端末での Ready の操作確認は実施済みである。
 - ユーザーは2026-10-07に末尾の `next` 追加仕様を承認した。
+- ユーザーは2026-10-08に `branch_name` の追加仕様を承認した。
+- `branch_name` の追加仕様は実装済みである。
 - ユーザーは2026-10-07に Ready を仕様整理への着手可能度へ変更する仕様を承認した。
 - Ready の判定基準の変更は実装済みである。
 
@@ -556,6 +558,8 @@ refs/heads/<prefix>/issue-<number>
 他の動作は、既存仕様を再利用する。
 本節の規定は、必須 (MUST) とする。
 本節は `next` にだけ適用する。
+ユーザーは2026-10-08に `branch_name` の追加仕様を承認した。
+`branch_name` の追加仕様は実装済みである。
 
 ### CLI: 次に着手する Issue の JSON 出力
 
@@ -608,6 +612,13 @@ gh-issues-triage next <owner>/<repo> --format json
 | `body` | string | 既存の Issue データが保持する本文 |
 | `score` | number | 検証済みの重要度。範囲は `0` 以上 `4` 以下 |
 | `readiness` | string | 仕様整理へ着手可能であることを示す `Yes` |
+| `branch_name` | string | ブランチ名の候補1件 |
+
+- `branch_name` は、`<prefix>/issue-<number>` の形式とする。
+- `prefix` は、選択された Issue の検証済みブランチ分類とする。
+- `number` は、選択された Issue の番号とする。
+- 候補は、既存のブランチ作成機能と同じ命名規則で生成する。
+- 候補の出力は、ブランチの存在や作成可否を保証しない。
 
 - GitHub の本文が `null` の場合、既存処理は空文字へ変換する。
 - `next` は、既存処理で変換した本文を空文字で出力する。
@@ -623,7 +634,7 @@ gh-issues-triage next <owner>/<repo> --format json
 出力例:
 
 ```json
-{"repository":"owner/repo","number":42,"title":"保存処理の修正","body":"再現条件と完了条件。","score":3.6,"readiness":"Yes"}
+{"repository":"owner/repo","number":42,"title":"保存処理の修正","body":"再現条件と完了条件。","score":3.6,"readiness":"Yes","branch_name":"fix/issue-42"}
 ```
 
 該当 Issue がない場合の出力:
