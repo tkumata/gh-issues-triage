@@ -36,6 +36,8 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Debug)]
 enum AppError {
     Auth(AuthError),
+    TokenRefresh(AuthError),
+    DeviceFlow(AuthError),
     Credential(CredentialError),
     Github(GithubError),
     Jev(JevError),
@@ -75,6 +77,10 @@ impl Display for AppError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Auth(error) => Display::fmt(error, formatter),
+            Self::TokenRefresh(error) => write!(formatter, "GitHub token refresh failed: {error}"),
+            Self::DeviceFlow(error) => {
+                write!(formatter, "GitHub device authorization failed: {error}")
+            }
             Self::Credential(error) => Display::fmt(error, formatter),
             Self::Github(error) => Display::fmt(error, formatter),
             Self::Jev(error) => Display::fmt(error, formatter),
@@ -96,11 +102,11 @@ fn http_client() -> Result<Client, AuthError> {
 
 fn device_authorize(
     client: &Client,
-    notice: &mut impl Write,
+    notice: &mut dyn Write,
 ) -> Result<credentials::Credentials, AppError> {
     credentials::ensure_available()?;
-    let client_id = auth::client_id()?;
-    let device = auth::request_device_code(client, &client_id)?;
+    let client_id = auth::client_id().map_err(AppError::DeviceFlow)?;
+    let device = auth::request_device_code(client, &client_id).map_err(AppError::DeviceFlow)?;
     writeln!(
         notice,
         "Open {} and enter code {}",
@@ -108,12 +114,51 @@ fn device_authorize(
     )
     .map_err(AppError::Output)?;
     notice.flush().map_err(AppError::Output)?;
-    let tokens = auth::poll_access_token(client, &client_id, &device)?;
+    let tokens =
+        auth::poll_access_token(client, &client_id, &device).map_err(AppError::DeviceFlow)?;
     let credentials = credentials::Credentials {
         access_token: tokens.access_token,
         refresh_token: tokens.refresh_token,
     };
     Ok(credentials)
+}
+
+fn fetch_authenticated_issues(
+    stored: &credentials::Credentials,
+    notice: &mut dyn Write,
+    mut fetch: impl FnMut(&str) -> Result<Vec<model::Issue>, GithubError>,
+    refresh: impl FnOnce(&str) -> Result<auth::TokenSet, AuthError>,
+    authorize: impl FnOnce(&mut dyn Write) -> Result<credentials::Credentials, AppError>,
+    save: impl FnOnce(&credentials::Credentials) -> Result<(), CredentialError>,
+) -> Result<Vec<model::Issue>, AppError> {
+    match fetch(&stored.access_token) {
+        Ok(issues) => return Ok(issues),
+        Err(GithubError::HttpStatus { status: 401 }) => {}
+        Err(error) => return Err(error.into()),
+    }
+    let renewed = if let Some(refresh_token) = stored.refresh_token.as_deref() {
+        match refresh(refresh_token) {
+            Ok(tokens) => credentials::Credentials {
+                access_token: tokens.access_token,
+                refresh_token: tokens.refresh_token,
+            },
+            Err(AuthError::Failure(auth::AuthFailure::BadRefreshToken)) => authorize(notice)?,
+            Err(AuthError::Failure(auth::AuthFailure::IncorrectClientCredentials)) => {
+                writeln!(
+                    notice,
+                    "GitHub rejected client credentials during token refresh; device authorization is required."
+                )
+                .map_err(AppError::Output)?;
+                notice.flush().map_err(AppError::Output)?;
+                authorize(notice)?
+            }
+            Err(error) => return Err(AppError::TokenRefresh(error)),
+        }
+    } else {
+        authorize(notice)?
+    };
+    save(&renewed)?;
+    Ok(fetch(&renewed.access_token)?)
 }
 
 fn load_ranked_issues(
@@ -133,29 +178,17 @@ fn load_ranked_issues(
         credentials::save_credentials(&credentials)?;
         credentials
     };
-    let issues = match fetch_issues(&client, &stored.access_token, repository) {
-        Ok(issues) => issues,
-        Err(GithubError::HttpStatus { status: 401 }) => {
-            let refreshed = if let Some(refresh_token) = stored.refresh_token.as_deref() {
-                let client_id = auth::client_id()?;
-                match auth::refresh_access_token(&client, &client_id, refresh_token) {
-                    Ok(tokens) => credentials::Credentials {
-                        access_token: tokens.access_token,
-                        refresh_token: tokens.refresh_token,
-                    },
-                    Err(AuthError::Failure(auth::AuthFailure::BadRefreshToken)) => {
-                        device_authorize(&client, notice)?
-                    }
-                    Err(error) => return Err(error.into()),
-                }
-            } else {
-                device_authorize(&client, notice)?
-            };
-            credentials::save_credentials(&refreshed)?;
-            fetch_issues(&client, &refreshed.access_token, repository)?
-        }
-        Err(error) => return Err(error.into()),
-    };
+    let issues = fetch_authenticated_issues(
+        &stored,
+        notice,
+        |token| fetch_issues(&client, token, repository),
+        |refresh_token| {
+            let client_id = auth::client_id()?;
+            auth::refresh_access_token(&client, &client_id, refresh_token)
+        },
+        |notice| device_authorize(&client, notice),
+        credentials::save_credentials,
+    )?;
     if issues.is_empty() {
         Ok(triage_issues(&client, "", issues)?)
     } else {
@@ -764,6 +797,309 @@ fn main() {
     if let Err(reason) = result {
         eprintln!("error: {reason}");
         process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod auth_tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    struct Scenario {
+        stored: credentials::Credentials,
+        fetches: Vec<Result<Vec<model::Issue>, GithubError>>,
+        refresh: Result<auth::TokenSet, AuthError>,
+        authorize: Result<credentials::Credentials, AppError>,
+        save: Result<(), CredentialError>,
+    }
+
+    impl Default for Scenario {
+        fn default() -> Self {
+            Self {
+                stored: credentials::Credentials {
+                    access_token: "saved-access".into(),
+                    refresh_token: Some("saved-refresh".into()),
+                },
+                fetches: vec![Err(GithubError::HttpStatus { status: 401 }), Ok(vec![])],
+                refresh: Ok(auth::TokenSet {
+                    access_token: "refreshed-access".into(),
+                    refresh_token: Some("refreshed-refresh".into()),
+                }),
+                authorize: Ok(credentials::Credentials {
+                    access_token: "authorized-access".into(),
+                    refresh_token: Some("authorized-refresh".into()),
+                }),
+                save: Ok(()),
+            }
+        }
+    }
+
+    struct Outcome {
+        result: Result<Vec<model::Issue>, AppError>,
+        events: Vec<String>,
+        notice: Vec<u8>,
+    }
+
+    impl Scenario {
+        fn run(self) -> Outcome {
+            let events = RefCell::new(Vec::new());
+            let mut fetches = self.fetches.into_iter();
+            let mut notice = Vec::new();
+            let result = fetch_authenticated_issues(
+                &self.stored,
+                &mut notice,
+                |token| {
+                    events.borrow_mut().push(format!("fetch:{token}"));
+                    fetches.next().unwrap_or(Err(GithubError::InvalidResponse))
+                },
+                |token| {
+                    events.borrow_mut().push(format!("refresh:{token}"));
+                    self.refresh
+                },
+                |_| {
+                    events.borrow_mut().push("authorize".into());
+                    self.authorize
+                },
+                |credentials| {
+                    events.borrow_mut().push(format!(
+                        "save:{}:{}",
+                        credentials.access_token,
+                        credentials.refresh_token.as_deref().unwrap_or("none")
+                    ));
+                    self.save
+                },
+            );
+            Outcome {
+                result,
+                events: events.into_inner(),
+                notice,
+            }
+        }
+    }
+
+    #[test]
+    fn valid_saved_token_skips_refresh_authorization_and_save() {
+        let outcome = Scenario {
+            fetches: vec![Ok(vec![model::Issue {
+                number: 31,
+                title: "saved token works".into(),
+                body: String::new(),
+            }])],
+            ..Scenario::default()
+        }
+        .run();
+        assert!(outcome.result.is_ok_and(|issues| {
+            issues.len() == 1 && issues.first().is_some_and(|issue| issue.number == 31)
+        }));
+        assert_eq!(outcome.events, ["fetch:saved-access"]);
+        assert_eq!(outcome.notice, [] as [u8; 0]);
+    }
+
+    #[test]
+    fn successful_refresh_saves_both_rotated_tokens_before_retry() {
+        let outcome = Scenario::default().run();
+        assert!(outcome.result.is_ok());
+        assert_eq!(
+            outcome.events,
+            [
+                "fetch:saved-access",
+                "refresh:saved-refresh",
+                "save:refreshed-access:refreshed-refresh",
+                "fetch:refreshed-access",
+            ]
+        );
+        assert_eq!(outcome.notice, [] as [u8; 0]);
+    }
+
+    #[test]
+    fn rejected_refresh_reauthorizes_once_then_saves_and_retries() {
+        for failure in [
+            auth::AuthFailure::BadRefreshToken,
+            auth::AuthFailure::IncorrectClientCredentials,
+        ] {
+            let needs_notice = failure == auth::AuthFailure::IncorrectClientCredentials;
+            let outcome = Scenario {
+                refresh: Err(AuthError::Failure(failure)),
+                ..Scenario::default()
+            }
+            .run();
+            assert!(outcome.result.is_ok());
+            assert_eq!(
+                outcome.events,
+                [
+                    "fetch:saved-access",
+                    "refresh:saved-refresh",
+                    "authorize",
+                    "save:authorized-access:authorized-refresh",
+                    "fetch:authorized-access",
+                ]
+            );
+            if needs_notice {
+                assert_eq!(
+                    String::from_utf8(outcome.notice).ok().as_deref(),
+                    Some(
+                        "GitHub rejected client credentials during token refresh; device authorization is required.\n"
+                    )
+                );
+            } else {
+                assert_eq!(outcome.notice, [] as [u8; 0]);
+            }
+        }
+    }
+
+    #[test]
+    fn absent_refresh_token_uses_device_flow_without_refresh() {
+        let mut scenario = Scenario::default();
+        scenario.stored.refresh_token = None;
+        let outcome = scenario.run();
+        assert!(outcome.result.is_ok());
+        assert_eq!(
+            outcome.events,
+            [
+                "fetch:saved-access",
+                "authorize",
+                "save:authorized-access:authorized-refresh",
+                "fetch:authorized-access",
+            ]
+        );
+    }
+
+    #[test]
+    fn issue_request_failures_do_not_refresh_or_reauthorize() {
+        for error in [
+            GithubError::HttpStatus { status: 403 },
+            GithubError::HttpRequest { timeout: true },
+        ] {
+            let outcome = Scenario {
+                fetches: vec![Err(error)],
+                ..Scenario::default()
+            }
+            .run();
+            assert!(matches!(outcome.result, Err(AppError::Github(_))));
+            assert_eq!(outcome.events, ["fetch:saved-access"]);
+        }
+    }
+
+    #[test]
+    fn other_refresh_failures_stop_with_refresh_context() {
+        for error in [
+            AuthError::HttpRequest { timeout: true },
+            AuthError::HttpStatus { status: 403 },
+            AuthError::InvalidResponse,
+            AuthError::MissingClientId,
+        ] {
+            let outcome = Scenario {
+                refresh: Err(error),
+                ..Scenario::default()
+            }
+            .run();
+            assert!(matches!(outcome.result, Err(AppError::TokenRefresh(_))));
+            assert_eq!(
+                outcome.events,
+                ["fetch:saved-access", "refresh:saved-refresh"]
+            );
+            assert_eq!(outcome.notice, [] as [u8; 0]);
+        }
+    }
+
+    #[test]
+    fn rejected_device_authorization_stops_without_save_or_retry() {
+        let outcome = Scenario {
+            refresh: Err(AuthError::Failure(
+                auth::AuthFailure::IncorrectClientCredentials,
+            )),
+            authorize: Err(AppError::DeviceFlow(AuthError::Failure(
+                auth::AuthFailure::IncorrectClientCredentials,
+            ))),
+            ..Scenario::default()
+        }
+        .run();
+        let error = outcome.result.err();
+        assert!(matches!(error, Some(AppError::DeviceFlow(_))));
+        assert_eq!(
+            error.map(|error| error.to_string()).as_deref(),
+            Some("GitHub device authorization failed: client credentials were rejected")
+        );
+        assert_eq!(
+            outcome.events,
+            ["fetch:saved-access", "refresh:saved-refresh", "authorize"]
+        );
+    }
+
+    #[test]
+    fn save_failure_stops_before_retry() {
+        let outcome = Scenario {
+            refresh: Err(AuthError::Failure(
+                auth::AuthFailure::IncorrectClientCredentials,
+            )),
+            save: Err(CredentialError::CredentialWriteFailed),
+            ..Scenario::default()
+        }
+        .run();
+        assert!(matches!(
+            outcome.result,
+            Err(AppError::Credential(CredentialError::CredentialWriteFailed))
+        ));
+        assert_eq!(
+            outcome.events,
+            [
+                "fetch:saved-access",
+                "refresh:saved-refresh",
+                "authorize",
+                "save:authorized-access:authorized-refresh",
+            ]
+        );
+    }
+
+    #[test]
+    fn failed_reauthorization_notice_stops_before_device_flow() {
+        let authorized = std::cell::Cell::new(false);
+        let result = fetch_authenticated_issues(
+            &Scenario::default().stored,
+            &mut io::Cursor::new([]),
+            |_| Err(GithubError::HttpStatus { status: 401 }),
+            |_| {
+                Err(AuthError::Failure(
+                    auth::AuthFailure::IncorrectClientCredentials,
+                ))
+            },
+            |_| {
+                authorized.set(true);
+                Err(AppError::DeviceFlow(AuthError::Expired))
+            },
+            |_| Ok(()),
+        );
+        assert!(matches!(result, Err(AppError::Output(_))));
+        assert!(!authorized.get());
+    }
+
+    #[test]
+    fn unauthorized_retry_stops_without_another_authorization() {
+        let outcome = Scenario {
+            fetches: vec![
+                Err(GithubError::HttpStatus { status: 401 }),
+                Err(GithubError::HttpStatus { status: 401 }),
+            ],
+            refresh: Err(AuthError::Failure(
+                auth::AuthFailure::IncorrectClientCredentials,
+            )),
+            ..Scenario::default()
+        }
+        .run();
+        assert!(matches!(
+            outcome.result,
+            Err(AppError::Github(GithubError::HttpStatus { status: 401 }))
+        ));
+        assert_eq!(
+            outcome.events,
+            [
+                "fetch:saved-access",
+                "refresh:saved-refresh",
+                "authorize",
+                "save:authorized-access:authorized-refresh",
+                "fetch:authorized-access",
+            ]
+        );
     }
 }
 

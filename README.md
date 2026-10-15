@@ -22,16 +22,12 @@ GitHub Issues の最新10件を取得し、Jev で重要度順に並べる CLI �
                │ Refresh token       │
                └──────────┬──────────┘
                           │ access token
-           ┌──────────────┴──────────────┐
-           ▼                             ▼
-┌─────────────────────┐       ┌─────────────────────┐
-│   GitHub REST API   │       │  GitHub GraphQL API │
-│                     │       │                     │
-│ Issues              │       │ Issues              │
-│ Repositories        │       │ Repositories        │
-│ Users               │       │ Projects            │
-└──────────┬──────────┘       └──────────┬──────────┘
-           └──────────────┬──────────────┘
+                          ▼
+               ┌─────────────────────┐
+               │   GitHub REST API   │
+               │                     │
+               │ Issues              │
+               └──────────┬──────────┘
                           │ Issue data
                           ▼
                ┌─────────────────────┐
@@ -82,7 +78,7 @@ cargo run -- next owner/repo --format json
 - `GITHUB_CLIENT_ID`: GitHub App client ID（token 更新と Device Flow 用）
 - `TYPESAFE_API_KEY`: TypeSafe Jev API key（Issue triage 用）
 
-GitHub 公式 REST API を使って認証とデータの取得を行います。
+認証には GitHub App の Device Flow を、Issue の取得には GitHub REST API を使います。
 
 ## How to Use
 
@@ -94,7 +90,7 @@ gh-issues-triage owner/repo
 cargo run -- owner/repo
 ```
 
-認証情報がない場合は Device Flow の確認 URL とコードを表示します。認証情報は macOS Keychain または Linux Secret Service に保存されます。保存済み access token が失効した場合は refresh token で自動更新し、refresh token がないか失効している場合だけ Device Flow を開始します。PAT と平文ファイルは使用しません。
+認証情報がない場合は Device Flow の確認 URL とコードを表示します。認証情報は macOS Keychain または Linux Secret Service に保存されます。保存済み access token が失効した場合は refresh token で自動更新します。refresh token がないか拒否された場合は Device Flow を開始します。更新時に `client credentials were rejected` が返った場合も、理由を表示して Device Flow での再認証へ一度だけ進みます。Keychain の項目を手動で削除する必要はありません。表示されたコードで再認証すると、新しい認証情報を保存して Issue 取得を一度だけ再試行します。再認証にも失敗した場合は、失敗した認証段階を示して終了します。PAT と平文ファイルは使用しません。
 
 repository 指定では、GitHub の open Issue を新しい順に最大10件取得し、pull request を除外します。全 Issue を1回の TypeSafe Jev リクエストで重要度判定、ブランチ名の分類、着手可能度の判定を行い、端末幅に合わせた Unicode 対応テーブルで表示します。
 
