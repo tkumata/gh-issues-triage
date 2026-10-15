@@ -36,6 +36,49 @@ pub(crate) struct ButtonRegion {
     pub(crate) line: usize,
 }
 
+pub(crate) const SEARCH_BUTTON: &str = "[Search]";
+pub(crate) const SEARCH_ROWS: usize = 3;
+
+pub(crate) fn render_search_input(
+    query: &str,
+    focused: bool,
+    width: usize,
+) -> ([String; SEARCH_ROWS], usize) {
+    let label = if focused { "Keywords> " } else { "Keywords: " };
+    let available = width.saturating_sub(label.width() + 1);
+    let mut tail = "";
+    for (start, _) in query.char_indices().rev() {
+        let candidate = query.split_at(start).1;
+        if candidate.width() > available {
+            break;
+        }
+        tail = candidate;
+    }
+    let text = format!("{label}{tail}");
+    let cursor = text.width() + 1;
+    (
+        [
+            pad_cell(&text, width),
+            pad_cell(SEARCH_BUTTON, width),
+            pad_cell("", width),
+        ],
+        cursor,
+    )
+}
+
+pub(crate) fn render_search_results(
+    issues: &[RankedIssue],
+    width: usize,
+    branches: &Result<BTreeSet<u64>, String>,
+) -> Result<RenderedTable, DisplayError> {
+    let mut table = render_table_with_buttons(issues, width, branches)?;
+    if issues.is_empty() {
+        table.text.push('\n');
+        table.text.push_str(&pad_cell("No matching issues.", width));
+    }
+    Ok(table)
+}
+
 pub(crate) struct RenderedTable {
     pub(crate) text: String,
     pub(crate) buttons: Vec<ButtonRegion>,
@@ -325,6 +368,41 @@ fn branch_help(branches: &Result<BTreeSet<u64>, String>, width: usize) -> Vec<St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_input_stays_one_line_and_shows_the_unicode_tail_and_cursor() {
+        for width in [37, 40, 60] {
+            for focused in [false, true] {
+                let query = format!("{}末尾🙂", "長い検索語".repeat(20));
+                let (lines, cursor) = render_search_input(&query, focused, width);
+                let label = if focused { "Keywords> " } else { "Keywords: " };
+                assert!(lines.first().is_some_and(|line| line.starts_with(label)));
+                assert_eq!(lines.get(1).map(|line| line.trim_end()), Some("[Search]"));
+                assert_eq!(lines.get(2).map(|line| line.trim_end()), Some(""));
+                assert!(
+                    lines
+                        .iter()
+                        .all(|line| line.width() == width && !line.contains('\n'))
+                );
+                assert!(
+                    lines
+                        .first()
+                        .is_some_and(|line| line.trim_end().ends_with("末尾🙂"))
+                );
+                assert!(cursor <= width);
+                assert_eq!(
+                    cursor,
+                    lines.first().map_or(0, |line| line.trim_end().width() + 1)
+                );
+            }
+        }
+        let empty = render_search_results(&[], 40, &Ok(BTreeSet::new()));
+        assert!(
+            matches!(empty, Ok(table) if table.text.contains("No matching issues.")
+            && table.buttons.is_empty() && table.issues.is_empty()
+            && table.text.lines().all(|line| line.width() == 40))
+        );
+    }
 
     #[test]
     fn renders_json_without_terminal_sanitizing_or_score_rounding() {

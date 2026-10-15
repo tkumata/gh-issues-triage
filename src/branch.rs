@@ -164,14 +164,20 @@ fn create_branch_at(
 mod tests {
     use super::*;
     use std::process;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir() -> std::io::Result<PathBuf> {
+        static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |duration| duration.as_nanos());
-        let path = env::temp_dir().join(format!("gh-issues-triage-{}-{nonce}", process::id()));
-        fs::create_dir_all(&path)?;
+        let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+        let path = env::temp_dir().join(format!(
+            "gh-issues-triage-{}-{nonce}-{sequence}",
+            process::id()
+        ));
+        fs::create_dir(&path)?;
         Ok(path)
     }
 
