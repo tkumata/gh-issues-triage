@@ -92,6 +92,21 @@ pub(crate) struct RankedIssue {
     pub(crate) readiness: Readiness,
 }
 
+pub(crate) fn search_issues(issues: &[RankedIssue], query: &str) -> Vec<RankedIssue> {
+    let query = query.to_ascii_lowercase();
+    issues
+        .iter()
+        .filter(|ranked| {
+            let title = ranked.issue.title.to_ascii_lowercase();
+            let body = ranked.issue.body.to_ascii_lowercase();
+            query
+                .split_whitespace()
+                .all(|word| title.contains(word) || body.contains(word))
+        })
+        .cloned()
+        .collect()
+}
+
 pub(crate) fn next_ready_issue(ranked: &[RankedIssue]) -> Option<&RankedIssue> {
     ranked
         .iter()
@@ -124,6 +139,53 @@ pub(crate) fn rank_issues(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn searches_all_words_in_title_or_body_and_preserves_order() {
+        let issues = [
+            (42, "Search 改善", "画面外\n本文の末尾"),
+            (7, "別の機能", "search query を確認"),
+            (3, "ＳＥＡＲＣＨ", "SEARCH  QUERY"),
+        ]
+        .map(|(number, title, body)| RankedIssue {
+            issue: Issue {
+                number,
+                title: title.into(),
+                body: body.into(),
+            },
+            score: 3.0,
+            prefix: "feat".into(),
+            readiness: Readiness::Yes,
+        });
+        for (query, expected) in [
+            ("sEaRcH", vec![42, 7, 3]),
+            ("本文の末尾", vec![42]),
+            ("search query", vec![7, 3]),
+            ("QUERY search", vec![7, 3]),
+            ("SEARCH  QUERY", vec![7, 3]),
+            (" \tsearch　 query \n", vec![7, 3]),
+            ("sea que", vec![7, 3]),
+            ("改善 画面外", vec![42]),
+            ("画面外 改善", vec![42]),
+            ("search 改善", vec![42]),
+            ("search missing", vec![]),
+            ("ＳＥＡＲＣＨ", vec![3]),
+            ("Ｓｅａｒｃｈ", vec![]),
+            ("改善画面外", vec![]),
+            ("missing", vec![]),
+            ("", vec![42, 7, 3]),
+            (" \t　\n", vec![42, 7, 3]),
+        ] {
+            assert_eq!(
+                search_issues(&issues, query)
+                    .iter()
+                    .map(|ranked| ranked.issue.number)
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+        assert_eq!(search_issues(&[], ""), []);
+    }
 
     #[test]
     fn next_ready_uses_importance_then_input_order_and_handles_no_candidate() {
