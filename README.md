@@ -5,46 +5,46 @@ GitHub Issues の最新10件を取得し、Jev で重要度順に並べる CLI �
 ## Components
 
 ```text
-               ┌─────────────────────┐
-               │     GitHub App      │
-               │                     │
-               │ Client ID           │
-               │ Permissions         │
-               │ Installation        │
-               └──────────┬──────────┘
-                          │ enables
-                          ▼
-               ┌─────────────────────┐
-               │     Device Flow     │
-               │                     │
-               │ User authorization  │
-               │ Access token        │
-               │ Refresh token       │
-               └──────────┬──────────┘
-                          │ access token
-                          ▼
-               ┌─────────────────────┐
-               │   GitHub REST API   │
-               │                     │
-               │ Issues              │
-               └──────────┬──────────┘
-                          │ Issue data
-                          ▼
-               ┌─────────────────────┐
-               │  gh-issues-triage   │
-               └──────────┬──────────┘
-                          │ Issue content
-                          ▼
-               ┌─────────────────────┐
-               │        Jev          │
-               │                     │
-               │ Importance scoring  │
-               └──────────┬──────────┘
-                          │ Scores
-                          ▼
-               ┌─────────────────────┐
-               │    Ranked Issues    │
-               └─────────────────────┘
+        ┌─────────────────────┐
+        │     GitHub App      │
+        │                     │
+        │ Client ID           │
+        │ Permissions         │
+        │ Installation        │
+        └──────────┬──────────┘
+                   │ enables
+                   ▼
+        ┌─────────────────────┐
+        │     Device Flow     │
+        │                     │
+        │ User authorization  │
+        │ Access token        │
+        │ Refresh token       │
+        └──────────┬──────────┘
+                   │ access token
+                   ▼
+        ┌─────────────────────┐
+        │   GitHub REST API   │
+        │                     │
+        │ Issues              │
+        └──────────┬──────────┘
+                   │ Issue data
+                   ▼
+        ┌─────────────────────┐
+        │  gh-issues-triage   │
+        └──────────┬──────────┘
+                   │ Issue content
+                   ▼
+        ┌─────────────────────┐
+        │        Jev          │
+        │                     │
+        │ Importance scoring  │
+        └──────────┬──────────┘
+                   │ Scores
+                   ▼
+        ┌─────────────────────┐
+        │    Ranked Issues    │
+        └─────────────────────┘
 ```
 
 private repository を使う場合は、GitHub App を対象 repository に install し、App の `Issues: Read` 権限を設定してください。
