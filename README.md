@@ -4,48 +4,7 @@ GitHub Issues の最新10件を取得し、Jev で重要度順に並べる CLI �
 
 ## Components
 
-```text
-        ┌─────────────────────┐
-        │     GitHub App      │
-        │                     │
-        │ Client ID           │
-        │ Permissions         │
-        │ Installation        │
-        └──────────┬──────────┘
-                   │ enables
-                   ▼
-        ┌─────────────────────┐
-        │     Device Flow     │
-        │                     │
-        │ User authorization  │
-        │ Access token        │
-        │ Refresh token       │
-        └──────────┬──────────┘
-                   │ access token
-                   ▼
-        ┌─────────────────────┐
-        │   GitHub REST API   │
-        │                     │
-        │ Issues              │
-        └──────────┬──────────┘
-                   │ Issue data
-                   ▼
-        ┌─────────────────────┐
-        │  gh-issues-triage   │
-        └──────────┬──────────┘
-                   │ Issue content
-                   ▼
-        ┌─────────────────────┐
-        │        Jev          │
-        │                     │
-        │ Importance scoring  │
-        └──────────┬──────────┘
-                   │ Scores
-                   ▼
-        ┌─────────────────────┐
-        │    Ranked Issues    │
-        └─────────────────────┘
-```
+![components](./docs/images/gh-issues-triage-components.png)
 
 private repository を使う場合は、GitHub App を対象 repository に install し、App の `Issues: Read` 権限を設定してください。
 
@@ -57,7 +16,7 @@ gh-issues-triage next owner/repo --format json
 cargo run -- next owner/repo --format json
 ```
 
-最新の open Issue 最大10件（pull request を除外）から、仕様整理に着手可能（Ready が `Yes`）で重要度が最も高い1件を返します。同点の場合は GitHub の取得順（作成日時の新しい順）を維持します。古い Issue を含む全件からの選択ではありません。
+最新の open Issue 最大10件 (pull request を除外) から、仕様整理に着手可能 (Ready が `Yes`) で重要度が最も高い1件を返します。同点の場合は GitHub の取得順 (作成日時の新しい順) を維持します。古い Issue を含む全件からの選択ではありません。
 
 標準出力は、末尾に改行を付けた単一行の JSON です。
 
@@ -75,8 +34,8 @@ cargo run -- next owner/repo --format json
 
 - Rust
 - `reqwest` crate
-- `GITHUB_CLIENT_ID`: GitHub App client ID（token 更新と Device Flow 用）
-- `TYPESAFE_API_KEY`: TypeSafe Jev API key（Issue triage 用）
+- `GITHUB_CLIENT_ID`: GitHub App client ID (token 更新と Device Flow 用)
+- `TYPESAFE_API_KEY`: TypeSafe Jev API key (Issue triage 用)
 
 認証には GitHub App の Device Flow を、Issue の取得には GitHub REST API を使います。
 
@@ -88,6 +47,8 @@ export TYPESAFE_API_KEY='<TypeSafe API key>'
 gh-issues-triage owner/repo
 # リポジトリから実行する場合
 cargo run -- owner/repo
+# AI エージェントのスキルから呼び出す時
+gh-issues-triage next owner/repo --format json
 ```
 
 認証情報がない場合は Device Flow の確認 URL とコードを表示します。認証情報は macOS Keychain または Linux Secret Service に保存されます。保存済み access token が失効した場合は refresh token で自動更新します。refresh token がないか拒否された場合は Device Flow を開始します。更新時に `client credentials were rejected` が返った場合も、理由を表示して Device Flow での再認証へ一度だけ進みます。Keychain の項目を手動で削除する必要はありません。表示されたコードで再認証すると、新しい認証情報を保存して Issue 取得を一度だけ再試行します。再認証にも失敗した場合は、失敗した認証段階を示して終了します。PAT と平文ファイルは使用しません。
@@ -107,9 +68,9 @@ cargo run -- config set-root /absolute/path/to/projects
 cargo run -- owner/repo
 ```
 
-`owner/repo` のローカル対象は `<root>/repo` です。Issue 本文下のボタンをクリックするか、`1`〜`9`・`0`（10件目）でブランチを作成します。検索中は、表示されている Issue の順番が数字キーに対応します。
+`owner/repo` のローカル対象は `<root>/repo` です。Issue 本文下のボタンをクリックするか、`1`〜`9`・`0` (10件目) でブランチを作成します。検索中は、表示されている Issue の順番が数字キーに対応します。
 
-一覧上部の `Keywords:` 欄へ Tab またはクリックで移動し、検索語を入力します。入力欄の下に `[Search]` ボタンを配置し、ボタンと一覧の間に空行を1行置きます。Enter または `[Search]` のクリックで、取得済みの最大10件のタイトル・本文を部分一致で絞り込みます。検索語は空白（全角空白を含む）で区切り、すべての語がタイトルまたは本文に含まれる Issue を表示する AND 検索です。語順は問わず、各語がタイトルと本文に分かれていても一致します。ASCII 英字の大小を区別しません。検索結果は重要度順を維持します。GitHub 上の全件検索や追加の API 呼び出しは行いません。
+一覧上部の `Keywords:` 欄へ Tab またはクリックで移動し、検索語を入力します。入力欄の下に `[Search]` ボタンを配置し、ボタンと一覧の間に空行を1行置きます。Enter または `[Search]` のクリックで、取得済みの最大10件のタイトル・本文を部分一致で絞り込みます。検索語は空白 (全角空白を含む) で区切り、すべての語がタイトルまたは本文に含まれる Issue を表示する AND 検索です。語順は問わず、各語がタイトルと本文に分かれていても一致します。ASCII 英字の大小を区別しません。検索結果は重要度順を維持します。GitHub 上の全件検索や追加の API 呼び出しは行いません。
 
 空文字または空白だけで検索すると取得済み全件へ戻ります。前後の空白や連続する空白は一致判定に影響しません。該当なしの場合も再検索できます。検索欄は1行で、長い検索語は末尾側を表示します。検索の実行後は一覧の操作へ戻ります。ブランチ作成結果から戻っても検索条件を維持します。
 
@@ -127,7 +88,7 @@ Issue 一覧の操作は次のとおりです。
 
 検索欄への入力中は `q`、`j`、`k`、数字も文字として扱います。貼り付け中の改行と Tab は空白として扱い、検索やブランチ作成の操作に使用しません。日本語 IME の変換確定用 Enter では検索せず、変換終了後の Enter で検索する要件です。自動テストは UTF-8 入力と検索実行を確認し、IME の変換状態は判定しません。`next owner/repo --format json` は検索機能の対象外です。ユーザーは 2026-10-15 に表示修正後の動作確認完了を報告し、検索機能の完了を承認しました。
 
-仮選択した Issue は、タイトル・本文・ボタンを含むセル全体を ANSI 16色の薄い青（bright blue）背景・黒文字でハイライトします。枠線の色は変えません。マウス移動と仮選択キーの最後の操作に合わせて選択を切り替え、仮選択だけではブランチを作成しません。ブランチ作成結果の画面では、`j`/`k`・上下矢印は1行ずつスクロールします。
+仮選択した Issue は、タイトル・本文・ボタンを含むセル全体を ANSI 16色の薄い青 (bright blue) 背景・黒文字でハイライトします。枠線の色は変えません。マウス移動と仮選択キーの最後の操作に合わせて選択を切り替え、仮選択だけではブランチを作成しません。ブランチ作成結果の画面では、`j`/`k`・上下矢印は1行ずつスクロールします。
 
 ブランチ名は `<prefix>/issue-<number>` で、対象リポジトリの `main` を起点にします。作成時に対象リポジトリを新しいブランチへ切り替えます。CLI の作業ディレクトリ変更と push は行いません。root は `XDG_CONFIG_HOME/gh-issues-triage/config.json`、未設定時は `~/.config/gh-issues-triage/config.json` に保存します。
 
