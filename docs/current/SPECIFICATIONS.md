@@ -87,13 +87,28 @@ gh-issues-triage --help
   - アプリケーションの認証情報が未保存である。
   - アプリケーションのリフレッシュトークンが存在しない。
   - GitHub が `bad_refresh_token` を返す。
+  - トークン更新時に GitHub が `incorrect_client_credentials` を返す。
+- 更新時の `incorrect_client_credentials` は、トークンの失効と断定しない。
+- 同エラーでは、アプリケーションは更新時に拒否された旨を表示する。
+- 同エラーでは、アプリケーションは再認証が必要である旨を表示する。
+- 案内の出力先は、既存の認証案内と同じとする。
+- アプリケーションは、Device Flow を一度だけ開始する。
+- Device Flow 自体が失敗した場合、アプリケーションは失敗終了する。
+- Device Flow の再認証では、既存の待機間隔と有効期限を使用する。
+- 再認証成功後だけ、アプリケーションは新しい認証情報を保存する。
+- 再認証前に、アプリケーションは保存項目を削除しない。
+- 保存成功後、アプリケーションは Issue 取得を一度だけ再試行する。
+- 再取得が失敗した場合、アプリケーションは再認証を繰り返さない。
 - Device Flow へ進まない認証エラーは、次の失敗とする。
   - 資格情報ストアの失敗
   - 通信の失敗
-  - `bad_refresh_token` 以外の更新エラー
+  - 上記2種類の OAuth エラー以外の更新エラー
   - 対象リポジトリの権限不足
 - Device Flow へ進まない認証エラーでは、アプリケーションは理由を表示する。
 - Device Flow へ進まない認証エラーでは、アプリケーションは失敗終了する。
+- 更新時の失敗では、エラーに `GitHub token refresh failed` を付ける。
+- Device Flow の認証失敗では、`GitHub device authorization failed` を付ける。
+- 認証段階の表示には、秘密値を含めない。
 - トークン更新が必要な場合、アプリケーションは `GITHUB_CLIENT_ID` を取得する。
 - Device Flow が必要な場合も、アプリケーションは `GITHUB_CLIENT_ID` を取得する。
 - 更新と Device Flow が不要な場合、アプリケーションは `GITHUB_CLIENT_ID` を取得しない。
