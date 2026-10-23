@@ -82,6 +82,157 @@ pub(crate) struct Issue {
     pub(crate) number: u64,
     pub(crate) title: String,
     pub(crate) body: String,
+    pub(crate) details: Option<IssueDetails>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IssueDetails {
+    pub(crate) author: Option<String>,
+    pub(crate) assignees: Vec<String>,
+    pub(crate) created_at: IssueDate,
+    pub(crate) fetched_order: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IssueDate {
+    utc: [u32; 6],
+    pub(crate) jst_date: String,
+}
+
+impl IssueDate {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        let parts = value.split(['-', 'T', ':', 'Z']).collect::<Vec<_>>();
+        let [year, month, day, hour, minute, second, ""] = parts.as_slice() else {
+            return None;
+        };
+        let utc = [year, month, day, hour, minute, second].map(|part| part.parse::<u32>().ok());
+        let [
+            Some(year),
+            Some(month),
+            Some(day),
+            Some(hour),
+            Some(minute),
+            Some(second),
+        ] = utc
+        else {
+            return None;
+        };
+        if format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z") != value
+            || !(1..=9999).contains(&year)
+            || !(1..=12).contains(&month)
+            || day == 0
+            || day > days_in_month(year, month)
+            || hour > 23
+            || minute > 59
+            || second > 59
+        {
+            return None;
+        }
+        let (mut jst_year, mut jst_month, mut jst_day) = (year, month, day);
+        if hour >= 15 {
+            jst_day += 1;
+            if jst_day > days_in_month(jst_year, jst_month) {
+                jst_day = 1;
+                jst_month += 1;
+                if jst_month > 12 {
+                    jst_month = 1;
+                    jst_year += 1;
+                }
+            }
+        }
+        (jst_year <= 9999).then(|| Self {
+            utc: [year, month, day, hour, minute, second],
+            jst_date: format!("{jst_year:04}-{jst_month:02}-{jst_day:02}"),
+        })
+    }
+}
+
+fn days_in_month(year: u32, month: u32) -> u32 {
+    match month {
+        2 if year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400)) => {
+            29
+        }
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SortColumn {
+    Importance,
+    Number,
+    Author,
+    CreatedAt,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct IssueSort {
+    pub(crate) column: SortColumn,
+    pub(crate) descending: bool,
+}
+
+impl Default for IssueSort {
+    fn default() -> Self {
+        Self {
+            column: SortColumn::Importance,
+            descending: true,
+        }
+    }
+}
+
+impl IssueSort {
+    pub(crate) fn toggle(&mut self, column: SortColumn) {
+        self.descending = self.column == column && !self.descending;
+        self.column = column;
+    }
+
+    pub(crate) fn apply(self, issues: &mut [RankedIssue]) {
+        issues.sort_by(|left, right| {
+            let left_details = left.issue.details.as_ref();
+            let right_details = right.issue.details.as_ref();
+            let order = match self.column {
+                SortColumn::Importance => left.score.total_cmp(&right.score),
+                SortColumn::Number => left.issue.number.cmp(&right.issue.number),
+                SortColumn::Author => {
+                    let left = left_details.and_then(|details| details.author.as_deref());
+                    let right = right_details.and_then(|details| details.author.as_deref());
+                    match (left, right) {
+                        (Some(left), Some(right)) => left.cmp(right),
+                        (None, Some(_)) => return Ordering::Greater,
+                        (Some(_), None) => return Ordering::Less,
+                        (None, None) => Ordering::Equal,
+                    }
+                }
+                SortColumn::CreatedAt => left_details
+                    .map(|details| details.created_at.utc)
+                    .cmp(&right_details.map(|details| details.created_at.utc)),
+            };
+            let order = if self.descending {
+                order.reverse()
+            } else {
+                order
+            };
+            order.then_with(|| {
+                left_details
+                    .map(|details| details.fetched_order)
+                    .cmp(&right_details.map(|details| details.fetched_order))
+            })
+        });
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_issue_details() -> IssueDetails {
+    IssueDetails {
+        author: Some("octocat".into()),
+        assignees: vec![],
+        created_at: IssueDate {
+            utc: [2026, 10, 23, 0, 0, 0],
+            jst_date: "2026-10-23".into(),
+        },
+        fetched_order: 0,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -141,6 +292,119 @@ mod tests {
     use super::*;
 
     #[test]
+    fn converts_valid_utc_dates_to_jst_and_rejects_invalid_timestamps() {
+        for (utc, jst) in [
+            ("2026-10-23T14:59:59Z", "2026-10-23"),
+            ("2026-10-23T15:00:00Z", "2026-10-24"),
+            ("2026-01-31T23:59:59Z", "2026-02-01"),
+            ("2026-12-31T15:00:00Z", "2027-01-01"),
+            ("2024-02-28T15:00:00Z", "2024-02-29"),
+            ("2024-02-29T15:00:00Z", "2024-03-01"),
+            ("2000-02-28T15:00:00Z", "2000-02-29"),
+            ("2100-02-28T15:00:00Z", "2100-03-01"),
+        ] {
+            assert_eq!(
+                IssueDate::parse(utc).map(|date| date.jst_date),
+                Some(jst.into())
+            );
+        }
+        for invalid in [
+            "",
+            "2026-02-29T00:00:00Z",
+            "2026-04-31T00:00:00Z",
+            "2026-00-01T00:00:00Z",
+            "2026-13-01T00:00:00Z",
+            "2026-01-00T00:00:00Z",
+            "0000-01-01T00:00:00Z",
+            "2026-10-23T24:00:00Z",
+            "2026-10-23T00:60:00Z",
+            "2026-10-23T00:00:60Z",
+            "2026-1-01T00:00:00Z",
+            "2026-10-23T00:00:00Zextra",
+            "9999-12-31T15:00:00Z",
+        ] {
+            assert!(IssueDate::parse(invalid).is_none(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn sorts_four_columns_in_both_directions_with_input_order_ties() {
+        let issues = [
+            (42, 2.0, Some("bob"), "2026-10-22T15:00:00Z"),
+            (7, 4.0, Some("Alice"), "2026-10-23T00:00:00Z"),
+            (3, 2.0, Some("bob"), "2026-10-23T15:00:00Z"),
+            (10, 2.0, None, "2026-10-22T00:00:00Z"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(fetched_order, (number, score, author, date))| {
+            Ok(RankedIssue {
+                issue: Issue {
+                    number,
+                    title: "title".into(),
+                    body: String::new(),
+                    details: Some(IssueDetails {
+                        author: author.map(str::to_owned),
+                        assignees: vec![],
+                        created_at: IssueDate::parse(date).ok_or("invalid fixture date")?,
+                        fetched_order,
+                    }),
+                },
+                score,
+                prefix: "feat".into(),
+                readiness: Readiness::Yes,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>();
+        assert!(issues.is_ok());
+        let Ok(mut issues) = issues else { return };
+        for (column, ascending, descending) in [
+            (
+                SortColumn::Importance,
+                vec![42, 3, 10, 7],
+                vec![7, 42, 3, 10],
+            ),
+            (SortColumn::Number, vec![3, 7, 10, 42], vec![42, 10, 7, 3]),
+            (SortColumn::Author, vec![7, 42, 3, 10], vec![42, 3, 7, 10]),
+            (
+                SortColumn::CreatedAt,
+                vec![10, 42, 7, 3],
+                vec![3, 7, 42, 10],
+            ),
+        ] {
+            for (descending, expected) in [(true, descending), (false, ascending)] {
+                IssueSort { column, descending }.apply(&mut issues);
+                assert_eq!(
+                    issues
+                        .iter()
+                        .map(|issue| issue.issue.number)
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+            }
+        }
+        IssueSort::default().apply(&mut issues);
+        assert_eq!(
+            issues
+                .iter()
+                .map(|issue| issue.issue.number)
+                .collect::<Vec<_>>(),
+            [7, 42, 3, 10]
+        );
+        let mut sort = IssueSort::default();
+        for (column, descending) in [
+            (SortColumn::Importance, false),
+            (SortColumn::Importance, true),
+            (SortColumn::Author, false),
+            (SortColumn::Author, true),
+            (SortColumn::Number, false),
+        ] {
+            sort.toggle(column);
+            assert_eq!(sort, IssueSort { column, descending });
+        }
+    }
+
+    #[test]
     fn searches_all_words_in_title_or_body_and_preserves_order() {
         let issues = [
             (42, "Search 改善", "画面外\n本文の末尾"),
@@ -149,6 +413,7 @@ mod tests {
         ]
         .map(|(number, title, body)| RankedIssue {
             issue: Issue {
+                details: Some(crate::model::test_issue_details()),
                 number,
                 title: title.into(),
                 body: body.into(),
@@ -192,6 +457,7 @@ mod tests {
         let ranked = rank_issues(
             (1..=5)
                 .map(|number| Issue {
+                    details: Some(crate::model::test_issue_details()),
                     number,
                     title: String::new(),
                     body: String::new(),
@@ -222,16 +488,19 @@ mod tests {
         let ranked = rank_issues(
             vec![
                 Issue {
+                    details: Some(crate::model::test_issue_details()),
                     number: 42,
                     title: "first".to_owned(),
                     body: String::new(),
                 },
                 Issue {
+                    details: Some(crate::model::test_issue_details()),
                     number: 7,
                     title: "second".to_owned(),
                     body: String::new(),
                 },
                 Issue {
+                    details: Some(crate::model::test_issue_details()),
                     number: 3,
                     title: "third".to_owned(),
                     body: String::new(),

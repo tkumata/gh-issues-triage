@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::model::{RankedIssue, RepositoryRef};
+use crate::model::{IssueSort, RankedIssue, RepositoryRef, SortColumn};
 
 pub(crate) fn render_next_json(
     repository: &RepositoryRef,
@@ -26,11 +26,19 @@ pub(crate) fn render_next_json(
 pub(crate) enum DisplayError {
     TerminalWidthUnavailable,
     TerminalWidthTooSmall { width: usize },
+    MissingIssueDetails,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ButtonRegion {
     pub(crate) issue_index: usize,
+    pub(crate) x_start: usize,
+    pub(crate) x_end: usize,
+    pub(crate) line: usize,
+}
+
+pub(crate) struct SortRegion {
+    pub(crate) column: SortColumn,
     pub(crate) x_start: usize,
     pub(crate) x_end: usize,
     pub(crate) line: usize,
@@ -98,8 +106,9 @@ pub(crate) fn render_search_results(
     issues: &[RankedIssue],
     width: usize,
     branches: &Result<BTreeSet<u64>, String>,
+    sort: IssueSort,
 ) -> Result<RenderedTable, DisplayError> {
-    let mut table = render_table_with_buttons(issues, width, branches)?;
+    let mut table = render_table_with_buttons(issues, width, branches, sort)?;
     if issues.is_empty() {
         table.text.push('\n');
         table.text.push_str(&pad_cell("No matching issues.", width));
@@ -112,6 +121,7 @@ pub(crate) struct RenderedTable {
     pub(crate) buttons: Vec<ButtonRegion>,
     pub(crate) issues: Vec<IssueRegion>,
     pub(crate) branch_help: Vec<String>,
+    pub(crate) sort_headers: Vec<SortRegion>,
 }
 
 pub(crate) struct IssueRegion {
@@ -137,6 +147,7 @@ impl std::fmt::Display for DisplayError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::TerminalWidthUnavailable => formatter.write_str("terminal width is unavailable"),
+            Self::MissingIssueDetails => formatter.write_str("issue display details are missing"),
             Self::TerminalWidthTooSmall { width } => write!(
                 formatter,
                 "terminal width {width} is too small for the table"
@@ -211,12 +222,12 @@ fn pad_cell(value: &str, width: usize) -> String {
     format!("{value}{}", " ".repeat(width.saturating_sub(value.width())))
 }
 
-fn horizontal_rule(left: char, junction: char, right: char, widths: [usize; 4]) -> String {
+fn horizontal_rule(left: char, junction: char, right: char, widths: [usize; 7]) -> String {
     let cells = widths.map(|width| "─".repeat(width + 2));
     format!("{left}{}{right}", cells.join(&junction.to_string()))
 }
 
-fn table_row(cells: [&str; 4], widths: [usize; 4], highlighted: bool) -> String {
+fn table_row(cells: [&str; 7], widths: [usize; 7], highlighted: bool) -> String {
     let cells = cells.into_iter().zip(widths).map(|(cell, width)| {
         let padded = format!(" {} ", pad_cell(cell, width));
         if highlighted {
@@ -243,16 +254,17 @@ fn branch_number_cell(
 
 #[cfg(test)]
 fn render_table(issues: &[RankedIssue], width: usize) -> Result<String, DisplayError> {
-    render_table_with_buttons(issues, width, &Ok(BTreeSet::new())).map(|table| table.text)
+    render_table_with_buttons(issues, width, &Ok(BTreeSet::new()), IssueSort::default())
+        .map(|table| table.text)
 }
 
-fn table_widths(issues: &[RankedIssue], width: usize) -> Result<[usize; 4], DisplayError> {
+fn table_widths(issues: &[RankedIssue], width: usize) -> Result<[usize; 7], DisplayError> {
     let importance_width = issues
         .iter()
         .map(|issue| issue.score.to_string().width())
         .max()
         .unwrap_or(0)
-        .max("重要度".width());
+        .max("重要度↓".width());
     let ready_width = issues
         .iter()
         .map(|issue| issue.readiness.label().width())
@@ -269,34 +281,196 @@ fn table_widths(issues: &[RankedIssue], width: usize) -> Result<[usize; 4], Disp
     if !issues.is_empty() {
         number_width += 1 + "🌿".width();
     }
-    let fixed_width = importance_width + ready_width + number_width + 13;
-    if width <= fixed_width || width - fixed_width < "Issues".width() {
+    number_width = number_width.max("番号↓".width());
+    let date_width = "YYYY-MM-DD".width();
+    let fixed_width = importance_width + ready_width + number_width + date_width + 22;
+    let minimum_variable = "Author↓".width() + "Assignees".width() + "Issues".width();
+    if width < fixed_width + minimum_variable {
         return Err(DisplayError::TerminalWidthTooSmall { width });
     }
+    let spare = width - fixed_width - minimum_variable;
+    let author_width = issues
+        .iter()
+        .filter_map(|issue| issue.issue.details.as_ref())
+        .filter_map(|details| details.author.as_deref())
+        .map(UnicodeWidthStr::width)
+        .max()
+        .unwrap_or(0)
+        .clamp("Author↓".width(), "Author↓".width() + spare / 4);
+    let assignees_width = issues
+        .iter()
+        .filter_map(|issue| issue.issue.details.as_ref())
+        .map(|details| details.assignees.join(", ").width())
+        .max()
+        .unwrap_or(0)
+        .clamp("Assignees".width(), "Assignees".width() + spare / 4);
     Ok([
         importance_width,
         ready_width,
         number_width,
-        width - fixed_width,
+        author_width,
+        assignees_width,
+        date_width,
+        width - fixed_width - author_width - assignees_width,
     ])
+}
+
+fn table_header(widths: [usize; 7], sort: IssueSort, line: usize) -> (String, Vec<SortRegion>) {
+    let headers = [
+        ("重要度", Some(SortColumn::Importance)),
+        ("Ready", None),
+        ("番号", Some(SortColumn::Number)),
+        ("Author", Some(SortColumn::Author)),
+        ("Assignees", None),
+        ("日付", Some(SortColumn::CreatedAt)),
+        ("Issues", None),
+    ];
+    let labels = headers.map(|(label, column)| {
+        if column == Some(sort.column) {
+            format!("{label}{}", if sort.descending { "↓" } else { "↑" })
+        } else {
+            label.to_owned()
+        }
+    });
+    let mut x_start = 2;
+    let mut sort_headers = Vec::new();
+    for ((_, column), width) in headers.into_iter().zip(widths) {
+        if let Some(column) = column {
+            sort_headers.push(SortRegion {
+                column,
+                x_start,
+                x_end: x_start + width + 1,
+                line,
+            });
+        }
+        x_start += width + 3;
+    }
+    (
+        table_row(labels.each_ref().map(String::as_str), widths, false),
+        sort_headers,
+    )
+}
+
+fn issue_content(ranked: &RankedIssue, width: usize, issue_index: usize) -> Vec<(String, bool)> {
+    let mut content = ranked
+        .issue
+        .title
+        .split('\n')
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if !ranked.issue.body.is_empty() {
+        content.extend(ranked.issue.body.split('\n').map(str::to_owned));
+    }
+    content.push(String::new());
+    content.push(format!("Branch: {}", crate::branch::branch_name(ranked)));
+    let button_index = content.len();
+    content.push(format!("[{}] Create branch", issue_index + 1));
+    let mut content_lines = Vec::new();
+    for (content_index, content_line) in content.into_iter().enumerate() {
+        content_lines.extend(
+            wrap_line(&content_line, width)
+                .into_iter()
+                .map(|line| (line, content_index == button_index)),
+        );
+    }
+    content_lines
+}
+
+fn render_issue(
+    ranked: &RankedIssue,
+    details: &crate::model::IssueDetails,
+    widths: [usize; 7],
+    branches: &Result<BTreeSet<u64>, String>,
+    issue_index: usize,
+    first_line: usize,
+) -> (Vec<String>, IssueRegion, Vec<ButtonRegion>) {
+    let number_label_width = widths[2] - 1 - "🌿".width();
+    let content_column = widths.iter().take(6).sum::<usize>() + 21;
+    let content_lines = issue_content(ranked, widths[6], issue_index);
+    let mut lines = Vec::new();
+    let mut highlighted = Vec::new();
+    let mut buttons = Vec::new();
+    let author = wrap_line(details.author.as_deref().unwrap_or("-"), widths[3]);
+    let assignees = wrap_line(
+        &if details.assignees.is_empty() {
+            "-".into()
+        } else {
+            details.assignees.join(", ")
+        },
+        widths[4],
+    );
+    for issue_line_index in 0..content_lines.len().max(author.len()).max(assignees.len()) {
+        let wrapped = content_lines.get(issue_line_index);
+        let importance = if issue_line_index == 0 {
+            ranked.score.to_string()
+        } else {
+            String::new()
+        };
+        let number = if issue_line_index == 0 {
+            branch_number_cell(ranked.issue.number, number_label_width, branches)
+        } else {
+            String::new()
+        };
+        let ready = if issue_line_index == 0 {
+            ranked.readiness.label()
+        } else {
+            ""
+        };
+        let cells = [
+            importance.as_str(),
+            ready,
+            number.as_str(),
+            author.get(issue_line_index).map_or("", String::as_str),
+            assignees.get(issue_line_index).map_or("", String::as_str),
+            if issue_line_index == 0 {
+                &details.created_at.jst_date
+            } else {
+                ""
+            },
+            wrapped.map_or("", |(line, _)| line.as_str()),
+        ];
+        lines.push(table_row(cells, widths, false));
+        highlighted.push(table_row(cells, widths, true));
+        if let Some((wrapped, true)) = wrapped {
+            buttons.push(ButtonRegion {
+                issue_index,
+                x_start: content_column,
+                x_end: content_column + wrapped.width() - 1,
+                line: first_line + lines.len() - 1,
+            });
+        }
+    }
+    let region = IssueRegion {
+        lines: first_line..first_line + lines.len(),
+        highlighted,
+    };
+    (lines, region, buttons)
 }
 
 pub(crate) fn render_table_with_buttons(
     issues: &[RankedIssue],
     width: usize,
     branches: &Result<BTreeSet<u64>, String>,
+    sort: IssueSort,
 ) -> Result<RenderedTable, DisplayError> {
+    let details = issues
+        .iter()
+        .map(|issue| {
+            issue
+                .issue
+                .details
+                .as_ref()
+                .ok_or(DisplayError::MissingIssueDetails)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let widths = table_widths(issues, width)?;
     let mut lines = wrap_line("重要度: 0（低）〜4（高）", width)
         .into_iter()
         .map(|line| pad_cell(&line, width))
         .collect::<Vec<_>>();
     lines.push(horizontal_rule('┌', '┬', '┐', widths));
-    lines.push(table_row(
-        ["重要度", "Ready", "番号", "Issues"],
-        widths,
-        false,
-    ));
+    let (header, sort_headers) = table_header(widths, sort, lines.len());
+    lines.push(header);
     if issues.is_empty() {
         lines.push(horizontal_rule('└', '┴', '┘', widths));
         return Ok(RenderedTable {
@@ -304,71 +478,18 @@ pub(crate) fn render_table_with_buttons(
             buttons: Vec::new(),
             issues: Vec::new(),
             branch_help: Vec::new(),
+            sort_headers,
         });
     }
     lines.push(horizontal_rule('├', '┼', '┤', widths));
-    let number_label_width = widths[2] - 1 - "🌿".width();
-    let content_column = widths[0] + widths[1] + widths[2] + 12;
     let mut buttons = Vec::new();
     let mut issue_regions = Vec::new();
-    for (issue_index, ranked) in issues.iter().enumerate() {
-        let first_line = lines.len();
-        let mut highlighted = Vec::new();
-        let mut content = ranked
-            .issue
-            .title
-            .split('\n')
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        if !ranked.issue.body.is_empty() {
-            content.extend(ranked.issue.body.split('\n').map(str::to_owned));
-        }
-        content.push(String::new());
-        content.push(format!("Branch: {}", crate::branch::branch_name(ranked)));
-        let button_index = content.len();
-        content.push(format!("[{}] Create branch", issue_index + 1));
-        let mut issue_line_index = 0;
-        for (content_index, content_line) in content.into_iter().enumerate() {
-            let wrapped_lines = wrap_line(&content_line, widths[3]);
-            for wrapped in &wrapped_lines {
-                let importance = if issue_line_index == 0 {
-                    ranked.score.to_string()
-                } else {
-                    String::new()
-                };
-                let number = if issue_line_index == 0 {
-                    branch_number_cell(ranked.issue.number, number_label_width, branches)
-                } else {
-                    String::new()
-                };
-                let ready = if issue_line_index == 0 {
-                    ranked.readiness.label()
-                } else {
-                    ""
-                };
-                let cells = [
-                    importance.as_str(),
-                    ready,
-                    number.as_str(),
-                    wrapped.as_str(),
-                ];
-                lines.push(table_row(cells, widths, false));
-                highlighted.push(table_row(cells, widths, true));
-                if content_index == button_index {
-                    buttons.push(ButtonRegion {
-                        issue_index,
-                        x_start: content_column,
-                        x_end: content_column + wrapped.width() - 1,
-                        line: lines.len() - 1,
-                    });
-                }
-                issue_line_index += 1;
-            }
-        }
-        issue_regions.push(IssueRegion {
-            lines: first_line..lines.len(),
-            highlighted,
-        });
+    for (issue_index, (ranked, details)) in issues.iter().zip(details).enumerate() {
+        let (rows, region, issue_buttons) =
+            render_issue(ranked, details, widths, branches, issue_index, lines.len());
+        lines.extend(rows);
+        issue_regions.push(region);
+        buttons.extend(issue_buttons);
         if issue_index + 1 < issues.len() {
             lines.push(horizontal_rule('├', '┼', '┤', widths));
         }
@@ -380,6 +501,7 @@ pub(crate) fn render_table_with_buttons(
         buttons,
         issues: issue_regions,
         branch_help: branch_help(branches, width),
+        sort_headers,
     })
 }
 
@@ -396,6 +518,67 @@ fn branch_help(branches: &Result<BTreeSet<u64>, String>, width: usize) -> Vec<St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn renders_wrapped_metadata_jst_and_sort_directions_without_control_sequences() {
+        let mut ranked = issue(42, "title", "body");
+        let mut details = crate::model::test_issue_details();
+        details.author = Some("long_author_\x1b[31m日本語".into());
+        details.assignees = vec![
+            "alice".into(),
+            "long_assignee_\x1b[31m".into(),
+            "zoe".into(),
+        ];
+        ranked.issue.details = Some(details);
+        let sort = IssueSort {
+            column: SortColumn::Author,
+            descending: false,
+        };
+        let table = render_table_with_buttons(&[ranked], 100, &Ok(BTreeSet::new()), sort);
+        assert!(table.is_ok());
+        let Ok(table) = table else { return };
+        assert!(table.text.contains("Author↑"));
+        assert!(table.text.contains("2026-10-23"));
+        assert!(table.text.lines().all(|line| line.width() == 100));
+        assert!(
+            !table
+                .text
+                .chars()
+                .any(|character| character.is_control() && character != '\n')
+        );
+        let mut author = String::new();
+        let mut assignees = String::new();
+        for region in &table.issues {
+            for line in table
+                .text
+                .lines()
+                .skip(region.lines.start)
+                .take(region.lines.len())
+            {
+                author.push_str(line.split('│').nth(4).unwrap_or("").trim());
+                assignees.push_str(line.split('│').nth(5).unwrap_or("").trim());
+            }
+        }
+        assert_eq!(author.replace(' ', ""), "long_author_[31m日本語");
+        assert_eq!(assignees.replace(' ', ""), "alice,long_assignee_[31m,zoe");
+        let unassigned = render_table_with_buttons(
+            &[issue(1, "title", "")],
+            100,
+            &Ok(BTreeSet::new()),
+            IssueSort::default(),
+        );
+        assert!(unassigned.is_ok());
+        let Ok(unassigned) = unassigned else { return };
+        assert!(unassigned.text.contains("重要度↓"));
+        assert!(
+            unassigned
+                .issues
+                .first()
+                .and_then(|region| unassigned.text.lines().nth(region.lines.start))
+                .and_then(|line| line.split('│').nth(5))
+                .is_some_and(|cell| cell.trim() == "-")
+        );
+    }
 
     #[test]
     fn search_input_stays_one_line_and_shows_the_unicode_tail_and_cursor() {
@@ -438,11 +621,11 @@ mod tests {
                 assert_eq!(cursor, before_cursor.width() + 1);
             }
         }
-        let empty = render_search_results(&[], 40, &Ok(BTreeSet::new()));
+        let empty = render_search_results(&[], 100, &Ok(BTreeSet::new()), IssueSort::default());
         assert!(
             matches!(empty, Ok(table) if table.text.contains("No matching issues.")
             && table.buttons.is_empty() && table.issues.is_empty()
-            && table.text.lines().all(|line| line.width() == 40))
+            && table.text.lines().all(|line| line.width() == 100))
         );
     }
 
@@ -524,6 +707,7 @@ mod tests {
     fn issue(number: u64, title: &str, body: &str) -> RankedIssue {
         RankedIssue {
             issue: crate::model::Issue {
+                details: Some(crate::model::test_issue_details()),
                 number,
                 title: title.to_owned(),
                 body: body.to_owned(),
@@ -537,17 +721,17 @@ mod tests {
     #[test]
     fn wraps_unicode_newlines_and_renders_empty_table() {
         let issue = issue(42, "タイトル🙂", "本文\n長い日本語");
-        for width in [37, 40, 60] {
+        for width in [80, 100, 120] {
             assert!(matches!(
                 render_table(std::slice::from_ref(&issue), width),
                 Ok(output) if output.lines().all(|line| line.width() == width)
             ));
         }
         assert!(matches!(
-            render_table(std::slice::from_ref(&issue), 40),
+            render_table(std::slice::from_ref(&issue), 100),
             Ok(output) if output.contains("タイトル") && output.contains("本文")
         ));
-        assert!(matches!(render_table(&[], 40), Ok(output)
+        assert!(matches!(render_table(&[], 100), Ok(output)
             if output.lines().count() == 4
                 && output.contains("Ready")
                 && output.lines().next().is_some_and(|line| line.trim() == "重要度: 0（低）〜4（高）")));
@@ -558,15 +742,16 @@ mod tests {
     #[test]
     fn places_button_region_after_each_issue_body_and_within_table_width() {
         let issues = [issue(42, "title", "first\nsecond"), issue(43, "next", "")];
-        let rendered = render_table_with_buttons(&issues, 51, &Ok(BTreeSet::new()));
+        let rendered =
+            render_table_with_buttons(&issues, 110, &Ok(BTreeSet::new()), IssueSort::default());
         assert!(matches!(rendered, Ok(table)
             if table.buttons.len() == 2
                 && table.buttons.first().is_some_and(|button| button.issue_index == 0)
                 && table.buttons.get(1).is_some_and(|button| button.issue_index == 1)
-                && table.text.lines().all(|line| line.width() == 51)
-                && table.buttons.first().is_some_and(|button| button.x_start == 30 && button.x_end - button.x_start + 1 == "[1] Create branch".width())
+                && table.text.lines().all(|line| line.width() == 110)
+                && table.buttons.first().is_some_and(|button| button.x_start == 66 && button.x_end - button.x_start + 1 == "[1] Create branch".width())
                 && table.buttons.first().and_then(|button| table.text.lines().nth(button.line - 1)).is_some_and(|line| line.contains("Branch:"))
-                && table.buttons.first().and_then(|button| table.text.lines().nth(button.line - 2)).is_some_and(|line| line.split('│').nth(4).is_some_and(|cell| cell.trim().is_empty()))
+                && table.buttons.first().and_then(|button| table.text.lines().nth(button.line - 2)).is_some_and(|line| line.split('│').nth(7).is_some_and(|cell| cell.trim().is_empty()))
                 && table.buttons.first().and_then(|button| table.text.lines().nth(button.line)).is_some_and(|line| line.contains("[1]"))
                 && table.buttons.get(1).and_then(|button| table.text.lines().nth(button.line)).is_some_and(|line| line.contains("[2]"))));
     }
@@ -584,8 +769,13 @@ mod tests {
             issue.readiness = readiness;
             issue
         });
-        for width in [51, 80] {
-            let table = render_table_with_buttons(&issues, width, &Ok(BTreeSet::from([42])));
+        for width in [95, 120] {
+            let table = render_table_with_buttons(
+                &issues,
+                width,
+                &Ok(BTreeSet::from([42])),
+                IssueSort::default(),
+            );
             assert!(table.is_ok());
             let Ok(table) = table else { return };
             assert!(table.text.lines().all(|line| line.width() == width));
@@ -608,12 +798,12 @@ mod tests {
                 }
             }
             for button in &table.buttons {
-                assert_eq!(button.x_start, 44);
+                assert_eq!(button.x_start, 80);
                 let cells = table
                     .text
                     .lines()
                     .nth(button.line)
-                    .and_then(|line| line.split('│').nth(4));
+                    .and_then(|line| line.split('│').nth(7));
                 assert_eq!(
                     cells.map(|cell| cell.trim_end().width()),
                     Some(button.x_end - button.x_start + 2)
@@ -628,8 +818,12 @@ mod tests {
 
     #[test]
     fn records_every_wrapped_button_fragment_as_a_clickable_region() {
-        let rendered =
-            render_table_with_buttons(&[issue(42, "title", "body")], 37, &Ok(BTreeSet::new()));
+        let rendered = render_table_with_buttons(
+            &[issue(42, "title", "body")],
+            75,
+            &Ok(BTreeSet::new()),
+            IssueSort::default(),
+        );
         assert!(matches!(rendered, Ok(table)
             if table.buttons.len() > 1
                 && table.buttons.iter().all(|button| button.issue_index == 0 && button.x_end >= button.x_start)
@@ -641,12 +835,22 @@ mod tests {
     fn sanitizes_control_characters_before_width_and_button_calculation() {
         let unsafe_input = issue(42, "title\u{1b}[31m", "line\r\t");
         let safe_input = issue(42, "title [31m", "line  ");
-        let unsafe_table = render_table_with_buttons(&[unsafe_input], 48, &Ok(BTreeSet::new()));
-        let safe_table = render_table_with_buttons(&[safe_input], 48, &Ok(BTreeSet::new()));
+        let unsafe_table = render_table_with_buttons(
+            &[unsafe_input],
+            100,
+            &Ok(BTreeSet::new()),
+            IssueSort::default(),
+        );
+        let safe_table = render_table_with_buttons(
+            &[safe_input],
+            100,
+            &Ok(BTreeSet::new()),
+            IssueSort::default(),
+        );
         assert!(
             matches!((unsafe_table, safe_table), (Ok(unsafe_table), Ok(safe_table))
             if !unsafe_table.text.chars().any(|character| character.is_control() && character != '\n')
-                && unsafe_table.text.lines().all(|line| line.width() == 48)
+                && unsafe_table.text.lines().all(|line| line.width() == 100)
                 && unsafe_table.buttons == safe_table.buttons
                 && unsafe_table.text.contains("title [31m")
                 && unsafe_table.text.contains("line  "))
@@ -660,8 +864,13 @@ mod tests {
             issue(42, "next", ""),
             issue(420, "last", ""),
         ];
-        for width in [37, 40, 80] {
-            let table = render_table_with_buttons(&issues, width, &Ok(BTreeSet::from([4, 420])));
+        for width in [80, 100, 120] {
+            let table = render_table_with_buttons(
+                &issues,
+                width,
+                &Ok(BTreeSet::from([4, 420])),
+                IssueSort::default(),
+            );
             assert!(table.is_ok());
             let Ok(table) = table else { return };
             let numbers = table
@@ -691,8 +900,12 @@ mod tests {
                         .is_some_and(|line| line.contains("\x1b[30;104m"))
                 );
             }
-            let unknown =
-                render_table_with_buttons(&issues, width, &Err("root missing\n\x1b[31m".into()));
+            let unknown = render_table_with_buttons(
+                &issues,
+                width,
+                &Err("root missing\n\x1b[31m".into()),
+                IssueSort::default(),
+            );
             assert!(unknown.is_ok());
             let Ok(unknown) = unknown else { return };
             for region in &unknown.issues {
@@ -721,7 +934,8 @@ mod tests {
                     .all(|line| line.width() <= width && !line.chars().any(char::is_control))
             );
         }
-        let empty = render_table_with_buttons(&[], 40, &Err("root missing".into()));
+        let empty =
+            render_table_with_buttons(&[], 100, &Err("root missing".into()), IssueSort::default());
         assert!(empty.is_ok());
         let Ok(empty) = empty else { return };
         assert_eq!(empty.branch_help, [] as [String; 0]);
@@ -734,8 +948,9 @@ mod tests {
                 issue(42, "タイトル│🙂", "本文\n\x1b[31m"),
                 issue(43, "next", "body"),
             ],
-            37,
+            80,
             &Ok(BTreeSet::new()),
+            IssueSort::default(),
         );
         assert!(table.is_ok());
         let Ok(table) = table else { return };
@@ -745,21 +960,21 @@ mod tests {
             let highlighted = table.lines(Some(selected));
             for (line_index, (line, original)) in highlighted.iter().zip(&plain).enumerate() {
                 if region.lines.contains(&line_index) {
-                    assert_eq!(line.matches("\x1b[30;104m").count(), 4);
-                    assert_eq!(line.matches("\x1b[39;49m").count(), 4);
+                    assert_eq!(line.matches("\x1b[30;104m").count(), 7);
+                    assert_eq!(line.matches("\x1b[39;49m").count(), 7);
                     assert!(line.starts_with("│\x1b[30;104m "));
                     assert!(line.ends_with(" \x1b[39;49m│"));
-                    assert_eq!(line.matches("\x1b[39;49m│").count(), 4);
+                    assert_eq!(line.matches("\x1b[39;49m│").count(), 7);
                     let uncolored = line.replace("\x1b[30;104m", "").replace("\x1b[39;49m", "");
                     assert_eq!(&uncolored, original);
-                    assert_eq!(uncolored.width(), 37);
+                    assert_eq!(uncolored.width(), 80);
                 } else {
                     assert_eq!(line, original);
                 }
             }
         }
         assert!(plain.iter().any(|line| line.contains("│🙂")));
-        let empty = render_table_with_buttons(&[], 40, &Ok(BTreeSet::new()));
+        let empty = render_table_with_buttons(&[], 100, &Ok(BTreeSet::new()), IssueSort::default());
         assert!(empty.is_ok());
         let Ok(empty) = empty else { return };
         assert!(empty.issues.is_empty());
