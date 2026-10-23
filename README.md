@@ -1,6 +1,6 @@
 # GitHub Issues Triage
 
-GitHub Issues の最新10件を取得し、Jev で重要度順に並べる CLI ツールです。
+GitHub Issues の最新 100 件を取得し、Jev で重要度順に並べる CLI ツールです。
 
 ## Components
 
@@ -12,11 +12,12 @@ private repository を使う場合は、GitHub App を対象 repository に inst
 
 ```shell
 gh-issues-triage next owner/repo --format json
+
 # リポジトリから実行する場合
 cargo run -- next owner/repo --format json
 ```
 
-最新の open Issue 最大10件 (pull request を除外) から、仕様整理に着手可能 (Ready が `Yes`) で重要度が最も高い1件を返します。同点の場合は GitHub の取得順 (作成日時の新しい順) を維持します。古い Issue を含む全件からの選択ではありません。
+最新の open Issue 最大100件 (pull request を除外) から、仕様整理に着手可能 (Ready が `Yes`) で重要度が最も高い1件を返します。同点の場合は GitHub の取得順 (作成日時の新しい順) を維持します。古い Issue を含む全件からの選択ではありません。
 
 標準出力は、末尾に改行を付けた単一行の JSON です。
 
@@ -45,15 +46,17 @@ cargo run -- next owner/repo --format json
 export GITHUB_CLIENT_ID='<GitHub App client ID>'
 export TYPESAFE_API_KEY='<TypeSafe API key>'
 gh-issues-triage owner/repo
+
 # リポジトリから実行する場合
 cargo run -- owner/repo
+
 # AI エージェントのスキルから呼び出す時
 gh-issues-triage next owner/repo --format json
 ```
 
 認証情報がない場合は Device Flow の確認 URL とコードを表示します。認証情報は macOS Keychain または Linux Secret Service に保存されます。保存済み access token が失効した場合は refresh token で自動更新します。refresh token がないか拒否された場合は Device Flow を開始します。更新時に `client credentials were rejected` が返った場合も、理由を表示して Device Flow での再認証へ一度だけ進みます。Keychain の項目を手動で削除する必要はありません。表示されたコードで再認証すると、新しい認証情報を保存して Issue 取得を一度だけ再試行します。再認証にも失敗した場合は、失敗した認証段階を示して終了します。PAT と平文ファイルは使用しません。
 
-repository 指定では、GitHub の open Issue を新しい順に最大10件取得し、pull request を除外します。全 Issue を1回の TypeSafe Jev リクエストで重要度判定、ブランチ名の分類、着手可能度の判定を行い、端末幅に合わせた Unicode 対応テーブルで表示します。
+repository 指定では、GitHub の open Issue を新しい順に最大 100 件取得し、pull request を除外します。全 Issue を1回の TypeSafe Jev リクエストで重要度判定、ブランチ名の分類、着手可能度の判定を行い、端末幅に合わせた Unicode 対応テーブルで表示します。
 
 `Ready` 列は、重要度とは独立して `brain-dump-docs` による仕様整理への着手可能度を表示します。具体的な振る舞いや問題が分かり、要求の骨格を創作せず整理できれば `Yes` です。話題や一般的な希望だけの場合や、基本動作・検出対象・違反条件などの機能の核心が不明な場合は `Needs information` です。質問を列挙できるだけでは `Yes` にしません。
 
@@ -69,8 +72,9 @@ cargo run -- owner/repo
 ```
 
 `owner/repo` のローカル対象は `<root>/repo` です。Issue 本文下のボタンをクリックするか、`1`〜`9`・`0` (10件目) でブランチを作成します。検索中は、表示されている Issue の順番が数字キーに対応します。
+11件目以降は、スクロールしてブランチ作成ボタンをクリックします。数字キーによる直接操作は先頭10件が対象です。
 
-一覧上部の `Keywords: [ ... ]` 欄へ Tab またはクリックで移動し、検索語を入力します。空欄では `Type keywords...` を灰色で表示します。入力すると案内を検索語に置き換えます。入力中は左右の角括弧を太字にし、枠内の入力位置にカーソルを表示します。入力欄の下に、前景色と背景色を反転した ` Search ` ボタンを配置し、ボタンと一覧の間に空行を1行置きます。Enter または `Search` のクリックで、取得済みの最大10件のタイトル・本文を部分一致で絞り込みます。検索語は空白 (全角空白を含む) で区切り、すべての語がタイトルまたは本文に含まれる Issue を表示する AND 検索です。語順は問わず、各語がタイトルと本文に分かれていても一致します。ASCII 英字の大小を区別しません。検索結果は重要度順を維持します。GitHub 上の全件検索や追加の API 呼び出しは行いません。
+一覧上部の `Keywords: [ ... ]` 欄へ Tab またはクリックで移動し、検索語を入力します。空欄では `Type keywords...` を灰色で表示します。入力すると案内を検索語に置き換えます。入力中は左右の角括弧を太字にし、枠内の入力位置にカーソルを表示します。入力欄の下に、前景色と背景色を反転した ` Search ` ボタンを配置し、ボタンと一覧の間に空行を1行置きます。Enter または `Search` のクリックで、取得済みの最大100件のタイトル・本文を部分一致で絞り込みます。検索語は空白 (全角空白を含む) で区切り、すべての語がタイトルまたは本文に含まれる Issue を表示する AND 検索です。語順は問わず、各語がタイトルと本文に分かれていても一致します。ASCII 英字の大小を区別しません。検索結果は重要度順を維持します。GitHub 上の全件検索や追加の API 呼び出しは行いません。
 
 ボタン右側には、一覧操作中は `Tab: edit keywords`、検索入力中は `Enter: search | Tab: list` を表示します。案内は端末幅に合わせて末尾を切り詰めます。ボタン左右の空白もクリックできます。操作案内のクリックでは検索しません。
 
