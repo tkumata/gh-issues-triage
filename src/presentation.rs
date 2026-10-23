@@ -36,7 +36,7 @@ pub(crate) struct ButtonRegion {
     pub(crate) line: usize,
 }
 
-pub(crate) const SEARCH_BUTTON: &str = "[Search]";
+pub(crate) const SEARCH_BUTTON: &str = " Search ";
 pub(crate) const SEARCH_ROWS: usize = 3;
 
 pub(crate) fn render_search_input(
@@ -45,7 +45,8 @@ pub(crate) fn render_search_input(
     width: usize,
 ) -> ([String; SEARCH_ROWS], usize) {
     let label = if focused { "Keywords> " } else { "Keywords: " };
-    let available = width.saturating_sub(label.width() + 1);
+    let field_width = width.saturating_sub(label.width() + 4);
+    let available = field_width.saturating_sub(1);
     let mut tail = "";
     for (start, _) in query.char_indices().rev() {
         let candidate = query.split_at(start).1;
@@ -54,12 +55,39 @@ pub(crate) fn render_search_input(
         }
         tail = candidate;
     }
-    let text = format!("{label}{tail}");
-    let cursor = text.width() + 1;
+    let placeholder = "Type keywords...";
+    let content = if query.is_empty() {
+        &placeholder[..placeholder.len().min(available)]
+    } else {
+        tail
+    };
+    let (left, right) = if focused {
+        ("\x1b[1m[\x1b[22m", "\x1b[1m]\x1b[22m")
+    } else {
+        ("[", "]")
+    };
+    let padding = " ".repeat(field_width.saturating_sub(content.width()));
+    let content = if query.is_empty() {
+        format!("\x1b[90m{content}\x1b[39m")
+    } else {
+        content.to_owned()
+    };
+    let text = format!("{label}{left} {content}{padding} {right}");
+    let cursor = label.width() + 3 + tail.width();
+    let hint = if focused {
+        "  Enter: search | Tab: list"
+    } else {
+        "  Tab: edit keywords"
+    };
+    let hint_width = width.saturating_sub(SEARCH_BUTTON.len());
+    let hint = hint.chars().take(hint_width).collect::<String>();
     (
         [
-            pad_cell(&text, width),
-            pad_cell(SEARCH_BUTTON, width),
+            text,
+            format!(
+                "\x1b[7m{SEARCH_BUTTON}\x1b[27m{}",
+                pad_cell(&hint, hint_width)
+            ),
             pad_cell("", width),
         ],
         cursor,
@@ -371,29 +399,43 @@ mod tests {
 
     #[test]
     fn search_input_stays_one_line_and_shows_the_unicode_tail_and_cursor() {
-        for width in [37, 40, 60] {
+        for width in [30, 33, 34, 37, 40, 60] {
             for focused in [false, true] {
                 let query = format!("{}末尾🙂", "長い検索語".repeat(20));
                 let (lines, cursor) = render_search_input(&query, focused, width);
                 let label = if focused { "Keywords> " } else { "Keywords: " };
                 assert!(lines.first().is_some_and(|line| line.starts_with(label)));
-                assert_eq!(lines.get(1).map(|line| line.trim_end()), Some("[Search]"));
-                assert_eq!(lines.get(2).map(|line| line.trim_end()), Some(""));
-                assert!(
-                    lines
-                        .iter()
-                        .all(|line| line.width() == width && !line.contains('\n'))
-                );
-                assert!(
-                    lines
-                        .first()
-                        .is_some_and(|line| line.trim_end().ends_with("末尾🙂"))
-                );
-                assert!(cursor <= width);
+                let button_line = &lines[1];
+                assert!(button_line.starts_with("\x1b[7m Search \x1b[27m  "));
+                let hint = if focused {
+                    "Enter: search | Tab: list"
+                } else {
+                    "Tab: edit keywords"
+                };
                 assert_eq!(
-                    cursor,
-                    lines.first().map_or(0, |line| line.trim_end().width() + 1)
+                    button_line.trim_end(),
+                    format!(
+                        "\x1b[7m Search \x1b[27m  {}",
+                        &hint[..hint.len().min(width - 10)]
+                    )
+                    .trim_end()
                 );
+                assert_eq!(lines.get(2).map(|line| line.trim_end()), Some(""));
+                assert!(lines.iter().all(|line| {
+                    let visible = line
+                        .replace("\x1b[7m", "")
+                        .replace("\x1b[27m", "")
+                        .replace("\x1b[1m", "")
+                        .replace("\x1b[22m", "");
+                    visible.width() == width && !visible.contains(['\n', '\x1b'])
+                }));
+                let input = lines[0].replace("\x1b[1m", "").replace("\x1b[22m", "");
+                assert!(input.starts_with(&format!("{label}[ ")));
+                assert!(input.ends_with(" ]"));
+                let before_cursor = input.trim_end_matches(']').trim_end();
+                assert!(before_cursor.ends_with("末尾🙂"));
+                assert!(cursor <= width - 2);
+                assert_eq!(cursor, before_cursor.width() + 1);
             }
         }
         let empty = render_search_results(&[], 40, &Ok(BTreeSet::new()));
@@ -402,6 +444,44 @@ mod tests {
             && table.buttons.is_empty() && table.issues.is_empty()
             && table.text.lines().all(|line| line.width() == 40))
         );
+    }
+
+    #[test]
+    fn search_field_shows_a_placeholder_only_when_empty_and_highlights_its_brackets() {
+        for focused in [false, true] {
+            for query in ["", "日本🙂", " "] {
+                let (lines, cursor) = render_search_input(query, focused, 40);
+                let input = &lines[0];
+                let visible = input
+                    .replace("\x1b[1m", "")
+                    .replace("\x1b[22m", "")
+                    .replace("\x1b[90m", "")
+                    .replace("\x1b[39m", "");
+                assert_eq!(visible.width(), 40);
+                assert!(visible.ends_with(" ]"));
+                assert_eq!(visible.contains("Type keywords..."), query.is_empty());
+                if query.is_empty() {
+                    assert!(input.contains("\x1b[90mType keywords...\x1b[39m "));
+                } else {
+                    assert!(!input.contains("\x1b[90m"));
+                    assert!(!input.contains("\x1b[39m"));
+                }
+                assert_eq!(cursor, 13 + query.width());
+                if focused {
+                    assert!(input.starts_with("Keywords> \x1b[1m[\x1b[22m "));
+                    assert!(input.ends_with(" \x1b[1m]\x1b[22m"));
+                } else {
+                    assert!(input.starts_with("Keywords: [ "));
+                    assert!(!visible.contains('\x1b'));
+                }
+                if !query.is_empty() {
+                    assert!(visible[12..].starts_with(query));
+                }
+            }
+        }
+        let (lines, cursor) = render_search_input("", true, 20);
+        assert!(lines[0].contains(" \x1b[90mType \x1b[39m "));
+        assert_eq!(cursor, 13);
     }
 
     #[test]
