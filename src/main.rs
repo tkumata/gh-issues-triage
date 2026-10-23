@@ -684,7 +684,7 @@ fn run_branch_actions(
 ) -> Result<(), String> {
     let height = terminal_height().map_err(|error| error.to_string())?;
     let action_help = wrap_line(
-        "Tab: search/list; Enter or [Search]: search; 1-9/0: create; j/k or arrows: select; PgUp/PgDn: scroll; q: quit (list); Ctrl+C: quit",
+        "Tab: search/list; Enter or Search: search; 1-9/0: create; j/k or arrows: select; PgUp/PgDn: scroll; q: quit (list); Ctrl+C: quit",
         width,
     );
     let mut terminal = TerminalMode::enter()?;
@@ -1273,6 +1273,18 @@ mod interaction_tests {
         assert!(search.route(ActionInput::Key(b'x')).is_ok());
         assert_eq!(search.draft, "queryx");
         assert_eq!(search.query, "query");
+        assert_eq!(
+            search.route(ActionInput::Mouse { x: 11, y: 2 }).ok(),
+            Some(ActionInput::Continue)
+        );
+        assert!(search.focused);
+        assert_eq!(search.query, "query");
+        assert_eq!(
+            search.route(ActionInput::Mouse { x: 1, y: 2 }).ok(),
+            Some(ActionInput::Search)
+        );
+        assert_eq!(search.query, "queryx");
+        assert!(!search.focused);
         let mut invalid = SearchState {
             focused: true,
             ..SearchState::default()
@@ -1538,8 +1550,11 @@ mod interaction_tests {
             .is_ok()
         );
         let search_output = String::from_utf8_lossy(&search_output);
-        assert!(search_output.contains("\x1b[1;1H\x1b[2KKeywords> 日本語"));
-        assert!(search_output.contains("\x1b[2;1H\x1b[2K[Search]"));
+        assert!(search_output.contains("\x1b[1;1H\x1b[2KKeywords> \x1b[1m[\x1b[22m 日本語"));
+        assert!(
+            search_output
+                .contains("\x1b[2;1H\x1b[2K\x1b[7m Search \x1b[27m  Enter: search | Tab: list")
+        );
         assert!(search_output.contains(&format!("\x1b[3;1H\x1b[2K{}", " ".repeat(40))));
         assert!(search_output.contains("\x1b[4;1H\x1b[2Ktable"));
         assert!(search_output.contains("\x1b[6;1H\x1b[2Khelp"));
