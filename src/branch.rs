@@ -218,6 +218,7 @@ mod tests {
         run(&repo, &["commit", "-m", "work change"])?;
         let issue = RankedIssue {
             issue: crate::model::Issue {
+                details: Some(crate::model::test_issue_details()),
                 number: 42,
                 title: String::new(),
                 body: String::new(),
@@ -294,6 +295,7 @@ mod tests {
         )?;
         let issue = RankedIssue {
             issue: crate::model::Issue {
+                details: Some(crate::model::test_issue_details()),
                 number: 8,
                 title: String::new(),
                 body: String::new(),
@@ -443,6 +445,7 @@ mod tests {
     fn formats_branch_and_accepts_only_github_origin_forms() {
         let issue = RankedIssue {
             issue: crate::model::Issue {
+                details: Some(crate::model::test_issue_details()),
                 number: 42,
                 title: String::new(),
                 body: String::new(),

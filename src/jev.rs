@@ -267,6 +267,7 @@ mod tests {
 
     fn issue(number: u64, title: &str, body: &str) -> Issue {
         Issue {
+            details: Some(crate::model::test_issue_details()),
             number,
             title: title.to_owned(),
             body: body.to_owned(),
