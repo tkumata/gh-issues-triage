@@ -5,7 +5,7 @@ use serde_json::Value;
 use crate::model::{Issue, RepositoryRef};
 
 const GITHUB_ISSUES_URL: &str = "https://api.github.com/repos";
-const MAX_ISSUES: usize = 10;
+const MAX_ISSUES: usize = 100;
 const GITHUB_PAGE_SIZE: u32 = 100;
 
 #[derive(Debug)]
@@ -179,7 +179,7 @@ mod tests {
     }
 
     #[test]
-    fn collects_multiple_github_pages_up_to_ten_and_handles_empty() {
+    fn collects_multiple_github_pages_up_to_one_hundred_and_handles_empty() {
         let mut issues = Vec::new();
         append_github_issues(
             &mut issues,
@@ -211,7 +211,7 @@ mod tests {
             issues.iter().map(|issue| issue.number).collect::<Vec<_>>(),
             [2, 3]
         );
-        let ten = (0..12)
+        let remaining = (4..114)
             .map(|number| GithubIssueResponse {
                 number,
                 title: number.to_string(),
@@ -219,8 +219,14 @@ mod tests {
                 pull_request: None,
             })
             .collect::<Vec<_>>();
-        append_github_issues(&mut issues, ten);
-        assert_eq!(issues.len(), MAX_ISSUES);
+        append_github_issues(&mut issues, remaining);
+        assert_eq!(issues.len(), 100);
+        assert_eq!(
+            issues.iter().map(|issue| issue.number).collect::<Vec<_>>(),
+            (2..102).collect::<Vec<_>>()
+        );
+        assert_eq!(issues.first().map(|issue| issue.body.as_str()), Some(""));
+        assert_eq!(issues.get(1).map(|issue| issue.body.as_str()), Some("body"));
         let mut empty = Vec::new();
         append_github_issues(&mut empty, Vec::new());
         assert_eq!(empty, [] as [Issue; 0]);
