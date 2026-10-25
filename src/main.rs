@@ -309,6 +309,7 @@ enum ActionInput {
     PasteByte(u8),
     Mouse { x: usize, y: usize },
     Hover { x: usize, y: usize },
+    Wheel { x: usize, y: usize, down: bool },
     Up,
     Down,
     PageUp,
@@ -413,6 +414,11 @@ impl SearchState {
             {
                 ActionInput::Continue
             }
+            ActionInput::Wheel { x, y, down } => ActionInput::Wheel {
+                x,
+                y: y.saturating_sub(SEARCH_ROWS),
+                down,
+            },
             ActionInput::Hover { x, y } => ActionInput::Hover {
                 x,
                 y: y.saturating_sub(SEARCH_ROWS),
@@ -454,6 +460,11 @@ fn parse_mouse_event(sequence: &str) -> Option<ActionInput> {
     match button {
         0 => Some(ActionInput::Mouse { x, y }),
         32..=35 => Some(ActionInput::Hover { x, y }),
+        64 | 65 => Some(ActionInput::Wheel {
+            x,
+            y,
+            down: button == 65,
+        }),
         _ => None,
     }
 }
@@ -710,6 +721,44 @@ fn show_result(
     Ok(())
 }
 
+fn draw_list_view(
+    stdout: &mut impl Write,
+    table: &mut RenderedTable,
+    list: &mut ListState,
+    search: &SearchState,
+    height: usize,
+    width: usize,
+    action_help: &[String],
+) -> Result<usize, String> {
+    let mut help = action_help.to_vec();
+    help.extend(table.branch_help.iter().cloned());
+    let viewport_rows = height.saturating_sub(help.len() + SEARCH_ROWS);
+    if viewport_rows == 0 {
+        return Err("terminal is too short to show issue actions".to_owned());
+    }
+    let importance_rows = wrap_line("重要度: 0（低）〜4（高）", width).len();
+    table
+        .limit_rows(viewport_rows.saturating_sub(importance_rows))
+        .map_err(|error| error.to_string())?;
+    let max_scroll = table.text.lines().count().saturating_sub(viewport_rows);
+    list.scroll = list.scroll.min(max_scroll);
+    let (header, cursor) = render_search_input(&search.draft, search.focused, width);
+    draw_view(
+        stdout,
+        &table.lines(list.selected),
+        list.scroll,
+        viewport_rows,
+        &help,
+        &header,
+    )?;
+    if search.focused {
+        write!(stdout, "\x1b[1;{cursor}H")
+            .and_then(|()| stdout.flush())
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(viewport_rows)
+}
+
 fn run_branch_actions(
     repository: &RepositoryRef,
     issues: &[model::RankedIssue],
@@ -719,7 +768,7 @@ fn run_branch_actions(
 ) -> Result<(), String> {
     let height = terminal_height().map_err(|error| error.to_string())?;
     let action_help = wrap_line(
-        "Click headers: sort; Tab: search/list; Enter or Search: search; 1-9/0: create; j/k or arrows: select; PgUp/PgDn: scroll; q: quit (list); Ctrl+C: quit",
+        "Click headers: sort; Tab: search/list; Enter or Search: search; 1-9/0: create; j/k or arrows: select; PgUp/PgDn: scroll list; wheel: scroll cell; q: quit (list); Ctrl+C: quit",
         width,
     );
     let mut terminal = TerminalMode::enter()?;
@@ -731,28 +780,16 @@ fn run_branch_actions(
     let mut input_state = InputState::default();
     let mut visible = issues.to_vec();
     loop {
-        let mut help = action_help.clone();
-        help.extend(table.branch_help.iter().cloned());
-        let viewport_rows = height.saturating_sub(help.len() + SEARCH_ROWS);
-        if viewport_rows == 0 {
-            return Err("terminal is too short to show issue actions".to_owned());
-        }
-        let max_scroll = table.text.lines().count().saturating_sub(viewport_rows);
-        list.scroll = list.scroll.min(max_scroll);
-        let (header, cursor) = render_search_input(&search.draft, search.focused, width);
-        draw_view(
+        let viewport_rows = draw_list_view(
             &mut stdout,
-            &table.lines(list.selected),
-            list.scroll,
-            viewport_rows,
-            &help,
-            &header,
+            &mut table,
+            &mut list,
+            &search,
+            height,
+            width,
+            &action_help,
         )?;
-        if search.focused {
-            write!(stdout, "\x1b[1;{cursor}H")
-                .and_then(|()| stdout.flush())
-                .map_err(|error| error.to_string())?;
-        }
+        let max_scroll = table.text.lines().count().saturating_sub(viewport_rows);
         let input = input_state
             .read_input(&mut stdin)
             .and_then(|input| search.route(input))
@@ -767,6 +804,12 @@ fn run_branch_actions(
                 .map_err(|error| error.to_string())?;
             list.selected = None;
             list.scroll = 0;
+            continue;
+        }
+        if let ActionInput::Wheel { x, y, down } = input {
+            if (1..=viewport_rows).contains(&y) {
+                table.scroll_cell(x, list.scroll + y - 1, down);
+            }
             continue;
         }
         if let Some(column) = sort_column_for(input, &table, list.scroll, viewport_rows) {
@@ -809,8 +852,10 @@ fn run_branch_actions(
             )?;
             if succeeded {
                 branches = branch::local_issue_branches(repository);
-                table = render_search_results(&visible, width, &branches, list.sort)
+                let mut updated = render_search_results(&visible, width, &branches, list.sort)
                     .map_err(|error| error.to_string())?;
+                updated.preserve_cell_offsets(&table);
+                table = updated;
             }
         }
     }
@@ -1797,8 +1842,132 @@ mod interaction_tests {
                 Some(ActionInput::Hover { x: 20, y: 5 })
             );
         }
-        for invalid in ["<0;20;5m", "<64;20;5M", "<0;0;5M", "<0;20;0M", "<0;20;5;1M"] {
+        for (button, down) in [(64, false), (65, true)] {
+            assert_eq!(
+                parse_mouse_event(&format!("<{button};20;5M")),
+                Some(ActionInput::Wheel { x: 20, y: 5, down })
+            );
+        }
+        for invalid in ["<0;20;5m", "<66;20;5M", "<0;0;5M", "<0;20;0M", "<0;20;5;1M"] {
             assert_eq!(parse_mouse_event(invalid), None);
+        }
+    }
+
+    #[test]
+    fn list_layout_uses_physical_help_rows_and_keeps_the_header_and_footer() {
+        let mut issues = sorting_issues();
+        for issue in &mut issues {
+            issue.issue.body = "body\n".repeat(30);
+        }
+        let table = render_search_results(&issues, 110, &Ok(BTreeSet::new()), IssueSort::default());
+        assert!(table.is_ok());
+        let Ok(mut table) = table else { return };
+        let mut output = Vec::new();
+        let mut list = ListState::default();
+        let search = SearchState::default();
+        let help = vec!["help one".to_owned(), "help two".to_owned()];
+        assert_eq!(
+            draw_list_view(&mut output, &mut table, &mut list, &search, 20, 110, &help),
+            Ok(14)
+        );
+        assert_eq!(
+            table
+                .issues
+                .iter()
+                .map(|row| row.lines.len())
+                .collect::<Vec<_>>(),
+            [5, 4, 4]
+        );
+        let output = String::from_utf8_lossy(&output);
+        assert!(output.contains("\x1b[1;1H\x1b[2KKeywords:"));
+        assert!(output.contains("\x1b[18;1H\x1b[2Khelp one"));
+        assert!(output.contains("\x1b[19;1H\x1b[2Khelp two"));
+        assert!(
+            draw_list_view(
+                &mut Vec::new(),
+                &mut table,
+                &mut list,
+                &search,
+                8,
+                110,
+                &help
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn wheel_routes_to_the_scrolled_cell_without_changing_keyboard_actions() {
+        let mut issues = sorting_issues();
+        for issue in &mut issues {
+            issue.issue.body = "body\n".repeat(30);
+        }
+        let table = render_search_results(&issues, 110, &Ok(BTreeSet::new()), IssueSort::default());
+        assert!(table.is_ok());
+        let Ok(mut table) = table else { return };
+        assert!(table.limit_rows(9).is_ok());
+        let Some(region) = table.issues.get(1) else {
+            return;
+        };
+        let line = region.lines.start;
+        let scroll = line - 1;
+        let mut search = SearchState::default();
+        let input = search.route(ActionInput::Wheel {
+            x: 109,
+            y: SEARCH_ROWS + 2,
+            down: true,
+        });
+        assert!(matches!(
+            input,
+            Ok(ActionInput::Wheel {
+                x: 109,
+                y: 2,
+                down: true
+            })
+        ));
+        let Ok(ActionInput::Wheel { x, y, down }) = input else {
+            return;
+        };
+        table.scroll_cell(x, scroll + y - 1, down);
+        assert!(table.limit_rows(9).is_ok());
+        assert_eq!(hovered_issue(&table, x, y, scroll, 4, 110), Some(1));
+        assert_eq!(
+            action_for(ActionInput::Key(b'2'), &table.buttons, scroll, 4),
+            Some(1)
+        );
+        let before = table.text.clone();
+        assert!(navigate_issue(ActionInput::Down, &table, Some(1), scroll, 4).is_some());
+        assert_eq!(
+            scroll_by(ActionInput::PageDown, scroll, 100, 4),
+            Some(scroll + 4)
+        );
+        assert_eq!(table.text, before);
+        for _ in 0..100 {
+            table.scroll_cell(x, line, true);
+        }
+        assert!(table.limit_rows(9).is_ok());
+        assert!(table.buttons.iter().any(|button| {
+            button.issue_index == 1
+                && action_for(
+                    ActionInput::Mouse {
+                        x: button.x_start,
+                        y: button.line - scroll + 1,
+                    },
+                    &table.buttons,
+                    scroll,
+                    100,
+                ) == Some(1)
+        }));
+        let mut sorted = issues.to_vec();
+        let mut list = ListState::default();
+        list.sort_by(SortColumn::Number, &mut sorted);
+        for visible in [sorted, search_issues(&issues, "issue 7")] {
+            let reset = render_search_results(&visible, 110, &Ok(BTreeSet::new()), list.sort);
+            assert!(reset.is_ok());
+            let Ok(mut reset) = reset else { return };
+            assert!(reset.limit_rows(9).is_ok());
+            assert_eq!(reset.buttons, [] as [ButtonRegion; 0]);
+            assert!(reset.text.contains("issue"));
         }
     }
 

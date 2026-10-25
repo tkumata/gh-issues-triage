@@ -27,6 +27,7 @@ pub(crate) enum DisplayError {
     TerminalWidthUnavailable,
     TerminalWidthTooSmall { width: usize },
     MissingIssueDetails,
+    TerminalHeightTooSmall,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,14 +123,80 @@ pub(crate) struct RenderedTable {
     pub(crate) issues: Vec<IssueRegion>,
     pub(crate) branch_help: Vec<String>,
     pub(crate) sort_headers: Vec<SortRegion>,
+    widths: [usize; 7],
 }
 
 pub(crate) struct IssueRegion {
     pub(crate) lines: std::ops::Range<usize>,
     highlighted: Vec<String>,
+    cells: [Vec<String>; 7],
+    button_lines: std::ops::Range<usize>,
+    offsets: [usize; 7],
 }
 
 impl RenderedTable {
+    pub(crate) fn limit_rows(&mut self, budget: usize) -> Result<(), DisplayError> {
+        let Some(first) = self.issues.first() else {
+            return Ok(());
+        };
+        if budget < 3 {
+            return Err(DisplayError::TerminalHeightTooSmall);
+        }
+        let mut lines = self
+            .text
+            .lines()
+            .take(first.lines.start)
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        self.buttons.clear();
+        let count = self.issues.len();
+        for (index, issue) in self.issues.iter_mut().enumerate() {
+            let limit = budget / 3 + usize::from(index < budget % 3);
+            let (rows, buttons) = issue.render(self.widths, index, lines.len(), limit);
+            lines.extend(rows);
+            self.buttons.extend(buttons);
+            let last = index + 1 == count;
+            lines.push(horizontal_rule(
+                if last { '└' } else { '├' },
+                if last { '┴' } else { '┼' },
+                if last { '┘' } else { '┤' },
+                self.widths,
+            ));
+        }
+        self.text = lines.join("\n");
+        Ok(())
+    }
+
+    pub(crate) fn scroll_cell(&mut self, x: usize, line: usize, down: bool) {
+        let Some(issue) = self
+            .issues
+            .iter_mut()
+            .find(|issue| issue.lines.contains(&line))
+        else {
+            return;
+        };
+        let mut start = 2;
+        for ((cell, offset), width) in issue.cells.iter().zip(&mut issue.offsets).zip(self.widths) {
+            if (start..start + width + 2).contains(&x) {
+                *offset = if down {
+                    offset
+                        .saturating_add(1)
+                        .min(cell.len().saturating_sub(issue.lines.len()))
+                } else {
+                    offset.saturating_sub(1)
+                };
+                return;
+            }
+            start += width + 3;
+        }
+    }
+
+    pub(crate) fn preserve_cell_offsets(&mut self, previous: &Self) {
+        for (issue, previous) in self.issues.iter_mut().zip(&previous.issues) {
+            issue.offsets = previous.offsets;
+        }
+    }
+
     pub(crate) fn lines(&self, highlighted: Option<usize>) -> Vec<String> {
         let mut lines = self.text.lines().map(str::to_owned).collect::<Vec<_>>();
         if let Some(issue) = highlighted.and_then(|index| self.issues.get(index)) {
@@ -148,6 +215,9 @@ impl std::fmt::Display for DisplayError {
         match self {
             Self::TerminalWidthUnavailable => formatter.write_str("terminal width is unavailable"),
             Self::MissingIssueDetails => formatter.write_str("issue display details are missing"),
+            Self::TerminalHeightTooSmall => {
+                formatter.write_str("terminal is too short to show issue rows")
+            }
             Self::TerminalWidthTooSmall { width } => write!(
                 formatter,
                 "terminal width {width} is too small for the table"
@@ -385,66 +455,85 @@ fn render_issue(
     first_line: usize,
 ) -> (Vec<String>, IssueRegion, Vec<ButtonRegion>) {
     let number_label_width = widths[2] - 1 - "🌿".width();
-    let content_column = widths.iter().take(6).sum::<usize>() + 21;
-    let content_lines = issue_content(ranked, widths[6], issue_index);
-    let mut lines = Vec::new();
-    let mut highlighted = Vec::new();
-    let mut buttons = Vec::new();
-    let author = wrap_line(details.author.as_deref().unwrap_or("-"), widths[3]);
-    let assignees = wrap_line(
-        &if details.assignees.is_empty() {
-            "-".into()
-        } else {
-            details.assignees.join(", ")
-        },
-        widths[4],
-    );
-    for issue_line_index in 0..content_lines.len().max(author.len()).max(assignees.len()) {
-        let wrapped = content_lines.get(issue_line_index);
-        let importance = if issue_line_index == 0 {
-            ranked.score.to_string()
-        } else {
-            String::new()
-        };
-        let number = if issue_line_index == 0 {
-            branch_number_cell(ranked.issue.number, number_label_width, branches)
-        } else {
-            String::new()
-        };
-        let ready = if issue_line_index == 0 {
-            ranked.readiness.label()
-        } else {
-            ""
-        };
-        let cells = [
-            importance.as_str(),
-            ready,
-            number.as_str(),
-            author.get(issue_line_index).map_or("", String::as_str),
-            assignees.get(issue_line_index).map_or("", String::as_str),
-            if issue_line_index == 0 {
-                &details.created_at.jst_date
-            } else {
-                ""
-            },
-            wrapped.map_or("", |(line, _)| line.as_str()),
-        ];
-        lines.push(table_row(cells, widths, false));
-        highlighted.push(table_row(cells, widths, true));
-        if let Some((wrapped, true)) = wrapped {
-            buttons.push(ButtonRegion {
-                issue_index,
-                x_start: content_column,
-                x_end: content_column + wrapped.width() - 1,
-                line: first_line + lines.len() - 1,
-            });
-        }
-    }
-    let region = IssueRegion {
-        lines: first_line..first_line + lines.len(),
-        highlighted,
+    let content = issue_content(ranked, widths[6], issue_index);
+    let button_start = content
+        .iter()
+        .position(|(_, button)| *button)
+        .unwrap_or(content.len());
+    let button_end = content.len();
+    let assignees = if details.assignees.is_empty() {
+        "-".to_owned()
+    } else {
+        details.assignees.join(", ")
     };
-    (lines, region, buttons)
+    let cells = [
+        vec![ranked.score.to_string()],
+        vec![ranked.readiness.label().to_owned()],
+        vec![branch_number_cell(
+            ranked.issue.number,
+            number_label_width,
+            branches,
+        )],
+        wrap_line(details.author.as_deref().unwrap_or("-"), widths[3]),
+        wrap_line(&assignees, widths[4]),
+        vec![details.created_at.jst_date.clone()],
+        content.into_iter().map(|(line, _)| line).collect(),
+    ];
+    let mut region = IssueRegion {
+        lines: first_line..first_line,
+        highlighted: Vec::new(),
+        cells,
+        button_lines: button_start..button_end,
+        offsets: [0; 7],
+    };
+    let (rows, buttons) = region.render(widths, issue_index, first_line, usize::MAX);
+    (rows, region, buttons)
+}
+
+impl IssueRegion {
+    fn render(
+        &mut self,
+        widths: [usize; 7],
+        issue_index: usize,
+        first_line: usize,
+        limit: usize,
+    ) -> (Vec<String>, Vec<ButtonRegion>) {
+        let height = self
+            .cells
+            .iter()
+            .map(Vec::len)
+            .max()
+            .unwrap_or(0)
+            .min(limit);
+        for (offset, cell) in self.offsets.iter_mut().zip(&self.cells) {
+            *offset = (*offset).min(cell.len().saturating_sub(height));
+        }
+        let mut rows = Vec::new();
+        let mut buttons = Vec::new();
+        self.highlighted.clear();
+        for row in 0..height {
+            let cells = std::array::from_fn(|column| {
+                self.cells
+                    .get(column)
+                    .zip(self.offsets.get(column))
+                    .and_then(|(cell, offset)| cell.get(offset + row))
+                    .map_or("", String::as_str)
+            });
+            rows.push(table_row(cells, widths, false));
+            self.highlighted.push(table_row(cells, widths, true));
+            if self.button_lines.contains(&(self.offsets[6] + row)) {
+                let x_start = widths.iter().take(6).sum::<usize>() + 21;
+                buttons.push(ButtonRegion {
+                    issue_index,
+                    x_start,
+                    x_end: x_start + cells[6].width() - 1,
+                    line: first_line + row,
+                });
+            }
+        }
+        self.lines = first_line..first_line + height;
+        (rows, buttons)
+    }
 }
 
 pub(crate) fn render_table_with_buttons(
@@ -479,6 +568,7 @@ pub(crate) fn render_table_with_buttons(
             issues: Vec::new(),
             branch_help: Vec::new(),
             sort_headers,
+            widths,
         });
     }
     lines.push(horizontal_rule('├', '┼', '┤', widths));
@@ -502,6 +592,7 @@ pub(crate) fn render_table_with_buttons(
         issues: issue_regions,
         branch_help: branch_help(branches, width),
         sort_headers,
+        widths,
     })
 }
 
@@ -518,6 +609,125 @@ fn branch_help(branches: &Result<BTreeSet<u64>, String>, width: usize) -> Vec<St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn caps_rows_distributes_remainders_and_rejects_insufficient_height() {
+        let issues = [1, 2, 3, 4].map(|number| issue(number, "title", &"body\n".repeat(30)));
+        let table =
+            render_table_with_buttons(&issues, 100, &Ok(BTreeSet::new()), IssueSort::default());
+        assert!(table.is_ok());
+        let Ok(mut table) = table else { return };
+        for (budget, expected) in [(9, [3, 3, 3, 3]), (10, [4, 3, 3, 3]), (11, [4, 4, 3, 3])] {
+            assert!(table.limit_rows(budget).is_ok());
+            assert_eq!(
+                table
+                    .issues
+                    .iter()
+                    .map(|row| row.lines.len())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert!(table.text.lines().all(|line| line.width() == 100));
+            assert_eq!(table.buttons, [] as [ButtonRegion; 0]);
+        }
+        assert!(matches!(
+            table.limit_rows(2),
+            Err(DisplayError::TerminalHeightTooSmall)
+        ));
+        assert!(table.limit_rows(3).is_ok());
+        assert!(table.issues.iter().all(|row| row.lines.len() == 1));
+        let short = render_table_with_buttons(
+            &[issue(1, "title", "")],
+            100,
+            &Ok(BTreeSet::new()),
+            IssueSort::default(),
+        );
+        assert!(short.is_ok());
+        let Ok(mut short) = short else { return };
+        let original = short.text.clone();
+        assert!(short.limit_rows(300).is_ok());
+        assert_eq!(short.text, original);
+    }
+
+    #[test]
+    fn scrolls_cells_independently_and_exposes_only_visible_button_fragments() {
+        let mut ranked = issue(42, "日本語🙂", &"本文\n".repeat(30));
+        if let Some(details) = &mut ranked.issue.details {
+            details.author = Some("a".repeat(100));
+            details.assignees = vec!["b".repeat(100)];
+        }
+        let table = render_table_with_buttons(
+            &[ranked.clone()],
+            100,
+            &Ok(BTreeSet::new()),
+            IssueSort::default(),
+        );
+        assert!(table.is_ok());
+        let Ok(mut table) = table else { return };
+        assert!(table.limit_rows(9).is_ok());
+        let Some(first) = table.issues.first() else {
+            return;
+        };
+        let line = first.lines.start;
+        let author_x = table.widths.iter().take(3).sum::<usize>() + 11;
+        let content_x = table.widths.iter().take(6).sum::<usize>() + 21;
+        let original = table.text.clone();
+        for x in [0, 1, author_x - 2, 101] {
+            table.scroll_cell(x, line, true);
+        }
+        table.scroll_cell(content_x, line - 1, true);
+        assert!(table.limit_rows(9).is_ok());
+        assert_eq!(table.text, original);
+        table.scroll_cell(author_x, line, true);
+        table.scroll_cell(content_x, line, true);
+        assert!(table.limit_rows(9).is_ok());
+        assert!(
+            table
+                .issues
+                .first()
+                .is_some_and(|row| row.offsets == [0, 0, 0, 1, 0, 0, 1])
+        );
+        assert!(!table.text.contains("日本語"));
+        assert_eq!(table.buttons, [] as [ButtonRegion; 0]);
+        for _ in 0..200 {
+            table.scroll_cell(content_x, line, true);
+        }
+        assert!(table.limit_rows(9).is_ok());
+        assert_ne!(table.buttons, [] as [ButtonRegion; 0]);
+        for button in &table.buttons {
+            assert_eq!(button.issue_index, 0);
+            assert!(
+                table
+                    .text
+                    .lines()
+                    .nth(button.line)
+                    .is_some_and(|row| row.contains("Create branch"))
+            );
+        }
+        let bottom = table.text.clone();
+        table.scroll_cell(content_x, line, true);
+        assert!(table.limit_rows(9).is_ok());
+        assert_eq!(table.text, bottom);
+        let refreshed = render_table_with_buttons(
+            &[ranked],
+            100,
+            &Ok(BTreeSet::from([42])),
+            IssueSort::default(),
+        );
+        assert!(refreshed.is_ok());
+        let Ok(mut refreshed) = refreshed else { return };
+        refreshed.preserve_cell_offsets(&table);
+        assert!(refreshed.limit_rows(9).is_ok());
+        assert!(refreshed.text.contains("🌿"));
+        assert_ne!(refreshed.buttons, [] as [ButtonRegion; 0]);
+        for _ in 0..200 {
+            table.scroll_cell(content_x, line, false);
+        }
+        assert!(table.limit_rows(9).is_ok());
+        assert!(table.text.contains("日本語🙂"));
+        assert_eq!(table.buttons, [] as [ButtonRegion; 0]);
+        assert!(table.text.lines().all(|row| row.width() == 100));
+    }
 
     #[test]
     fn renders_wrapped_metadata_jst_and_sort_directions_without_control_sequences() {
