@@ -1,6 +1,8 @@
 # GitHub Issues Triage
 
-GitHub Issues の最新 100 件を取得し、Jev で重要度順に並べる CLI ツールです。
+GitHub Issues の最新 100 件を取得し、Jev で重要度順に並べる TUI/CLI ツールです。
+
+![gh-issues-triage-screenshot](./docs/images/gh-issues-triage-screenshot.png)
 
 ## Components
 
