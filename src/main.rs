@@ -749,6 +749,13 @@ fn show_help(
             ActionInput::Quit => return Ok(true),
             ActionInput::Key(0x1b | b'\r' | b'\n') => return Ok(false),
             ActionInput::Mouse { x, y } if dialog.closes_at(x, y) => return Ok(false),
+            ActionInput::Wheel { x, y, down } if dialog.content_contains(x, y) => {
+                scroll = if down {
+                    scroll.saturating_add(1).min(dialog.max_scroll())
+                } else {
+                    scroll.saturating_sub(1)
+                };
+            }
             _ => {
                 if let Some(next) = scroll_by(input, scroll, dialog.max_scroll(), dialog.rows) {
                     scroll = next;
@@ -1922,6 +1929,65 @@ mod interaction_tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn help_wheel_scrolls_only_content_and_stops_at_both_ends() {
+        for (width, height, left, right) in [(80, 24, 1, 80), (120, 40, 17, 104)] {
+            let Ok(dialog) = HelpDialog::new(width, height) else {
+                unreachable!();
+            };
+            let first_row = dialog.top + 3;
+            let last_row = first_row + dialog.rows - 1;
+            let mut steps = vec![
+                (format!("\x1b[<64;{};{first_row}M", left + 1), 0),
+                (format!("\x1b[<65;{};{first_row}M", left + 1), 1),
+                (format!("\x1b[<64;{};{last_row}M", right - 1), 0),
+            ];
+            for row in 1..=height {
+                if !(first_row..=last_row).contains(&row) {
+                    steps.push((format!("\x1b[<65;{};{row}M", left + 1), 0));
+                }
+            }
+            for x in [left, right, 1, width] {
+                steps.push((format!("\x1b[<65;{x};{first_row}M"), 0));
+            }
+            for next in 1..=dialog.max_scroll() + 2 {
+                steps.push((
+                    format!("\x1b[<65;{};{last_row}M", right - 1),
+                    next.min(dialog.max_scroll()),
+                ));
+            }
+            for count in 1..=dialog.max_scroll() + 2 {
+                steps.push((
+                    format!("\x1b[<64;{};{first_row}M", left + 1),
+                    dialog.max_scroll().saturating_sub(count),
+                ));
+            }
+            let mut script = String::new();
+            let mut expected = Vec::new();
+            for scroll in std::iter::once(0).chain(steps.iter().map(|(_, scroll)| *scroll)) {
+                for (row, line) in dialog.lines(scroll).iter().enumerate() {
+                    assert!(write!(expected, "\x1b[{};{}H{line}", dialog.top + row, left).is_ok());
+                }
+            }
+            for (event, _) in steps {
+                script.push_str(&event);
+            }
+            script.push_str("\r1");
+            let mut reader = Cursor::new(script.as_bytes());
+            let mut output = Vec::new();
+            let mut input_state = InputState::default();
+            assert_eq!(
+                show_help(width, height, &mut reader, &mut output, &mut input_state),
+                Ok(false)
+            );
+            assert_eq!(output, expected);
+            assert_eq!(
+                input_state.read_input(&mut reader).ok(),
+                Some(ActionInput::Key(b'1'))
+            );
+        }
     }
 
     #[test]

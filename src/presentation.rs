@@ -169,6 +169,11 @@ impl HelpDialog {
         y == self.close_y && (self.left + 2..self.left + 2 + CLOSE_BUTTON.len()).contains(&x)
     }
 
+    pub(crate) fn content_contains(&self, x: usize, y: usize) -> bool {
+        (self.left + 1..self.left + self.width - 1).contains(&x)
+            && (self.top + 3..self.top + 3 + self.rows).contains(&y)
+    }
+
     pub(crate) fn lines(&self, scroll: usize) -> Vec<String> {
         let mut lines = vec![format!("┌{}┐", "─".repeat(self.width - 2))];
         let heading = " Help: (マウスホイールでスクロール)";
