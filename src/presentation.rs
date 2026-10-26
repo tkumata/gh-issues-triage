@@ -93,35 +93,41 @@ pub(crate) fn render_search_input(
     ([text, pad_cell("", width)], cursor)
 }
 
-const HELP_TEXT: &str = "一覧操作
-Tab: 一覧と検索入力を切り替え
-j/k・上下矢印: Issue を仮選択
-マウスオーバー: Issue を仮選択
-PageUp/PageDown: 一覧全体をスクロール
-ホイール: ポインター直下のセル内をスクロール
-重要度・番号・Author・日付の見出しクリック: 並べ替え
-同じ見出しの再クリック: 昇順と降順を切り替え
-↑: 昇順 / ↓: 降順
-Create branch のクリック: 対象 Issue のブランチを作成
-1–9/0: 表示順の先頭10件のブランチを作成
-一覧で q / Ctrl+C: 終了
+const HELP_TEXT: &str = "
+一覧画面の操作
+
+- Tab キー: 一覧と検索入力を切り替え
+- j/k・↑↓ キー: Issue を仮選択
+- マウスオーバー: Issue を仮選択
+- PageUp/PageDown キー: 一覧全体をスクロール
+- マウスホイール: ポインター直下のセル内をスクロール
+- 重要度・番号・Author・日付の見出しクリック: 並べ替え変更
+  ↑: 昇順 / ↓: 降順
+- Create branch のクリック: 対象 Issue のブランチを作成
+  1 – 9/0: 表示順の先頭10件のブランチを作成
+- 一覧画面で q / Ctrl+C: アプリの終了
 
 検索方法
-Tab または入力欄のクリック: 検索入力へ移動
-Keywords>: 入力中 / Backspace: 末尾の文字を削除
-Enter または Search: 検索を実行
-取得済み最大100件のタイトルと本文を検索
-空白区切りの AND 検索。語順は不問
-ASCII 英字の大小は区別しない
-空欄・空白だけの検索: 絞り込みを解除
+
+- Tab キーまたは入力欄のクリック: 検索入力へ移動
+- Keywords>: 入力中 / Backspace: 末尾の文字を削除
+- Enter キーまたは Search ボタンのクリックで検索を実行
+  取得済み最大 100 件のタイトルと本文を検索
+- 空白区切りの AND 検索。語順は不問
+- ASCII 英字の大小は区別しない
+- 空欄・空白だけの検索: 絞り込みを解除
 
 表示の意味
-🌿: ブランチあり / 空欄: ブランチなし / ?: 確認不能
-重要度: 0 (低) ～ 4 (高)
-Ready: 仕様整理への着手可能度
-Yes: 着手可能
-Needs information: 情報の追加が必要
-Needs investigation: 事前調査が必要";
+
+- アイコンの意味
+  - 🌿: ブランチあり
+  - 空欄: ブランチなし
+  - ?: 確認不能
+- 重要度: 0 (低) ～ 4 (高)
+- Ready: 仕様整理への着手可能度
+  - Yes: 着手可能
+  - Needs information: 情報の追加が必要
+  - Needs investigation: 事前調査が必要";
 
 pub(crate) struct HelpDialog {
     pub(crate) left: usize,
@@ -166,10 +172,7 @@ impl HelpDialog {
 
     pub(crate) fn lines(&self, scroll: usize) -> Vec<String> {
         let mut lines = vec![format!("┌{}┐", "─".repeat(self.width - 2))];
-        lines.push(format!(
-            "│{}│",
-            pad_cell(" Help: j/k ↑↓ PgUp/PgDn", self.width - 2)
-        ));
+        lines.push(format!("│{}│", pad_cell(" Help:", self.width - 2)));
         for row in 0..self.rows {
             let text = self.content.get(scroll + row).map_or("", String::as_str);
             lines.push(format!("│ {} │", pad_cell(text, self.width - 4)));
