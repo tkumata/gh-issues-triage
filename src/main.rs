@@ -399,6 +399,7 @@ impl SearchState {
                 }
                 ActionInput::Continue
             }
+            ActionInput::Mouse { y: 2, .. } => ActionInput::Continue,
             ActionInput::Mouse { x, y } => {
                 self.focused = false;
                 ActionInput::Mouse {
@@ -1542,6 +1543,11 @@ mod interaction_tests {
                     Some(ActionInput::Continue)
                 );
                 assert!(search.focused);
+                assert_eq!(
+                    search.route(ActionInput::Mouse { x: 11, y: 2 }, width).ok(),
+                    Some(ActionInput::Continue)
+                );
+                assert!(search.focused);
                 for outside in [1, 10, start - 1, width + 1] {
                     assert_eq!(
                         search
@@ -1847,8 +1853,9 @@ mod interaction_tests {
         let search_output = String::from_utf8_lossy(&search_output);
         assert!(search_output.contains("\x1b[1;1H\x1b[2KKeywords> \x1b[1m[\x1b[22m 日本語"));
         assert!(search_output.contains("\x1b[7m   Search   \x1b[27m"));
-        assert!(search_output.contains("\x1b[2;1H\x1b[2Ktable"));
-        assert!(search_output.contains("\x1b[4;1H\x1b[2Khelp"));
+        assert!(search_output.contains(&format!("\x1b[2;1H\x1b[2K{}", " ".repeat(40))));
+        assert!(search_output.contains("\x1b[3;1H\x1b[2Ktable"));
+        assert!(search_output.contains("\x1b[5;1H\x1b[2Khelp"));
 
         let no_input = read_input(&mut Cursor::new(b"")).unwrap_or(ActionInput::Quit);
         assert_eq!(no_input, ActionInput::Continue);
@@ -1996,7 +2003,7 @@ mod interaction_tests {
         table.branch_errors = vec!["error one".to_owned(), "error two".to_owned()];
         assert_eq!(
             draw_list_view(&mut output, &mut table, &mut list, &search, 20, 110),
-            Ok(16)
+            Ok(15)
         );
         assert_eq!(
             table
@@ -2004,7 +2011,7 @@ mod interaction_tests {
                 .iter()
                 .map(|row| row.lines.len())
                 .collect::<Vec<_>>(),
-            [5, 5, 5]
+            [5, 5, 4]
         );
         let output = String::from_utf8_lossy(&output);
         assert!(output.contains("\x1b[1;1H\x1b[2KKeywords:"));

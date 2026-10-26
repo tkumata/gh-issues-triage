@@ -46,7 +46,7 @@ pub(crate) struct SortRegion {
 }
 
 pub(crate) const SEARCH_BUTTON: &str = "   Search   ";
-pub(crate) const SEARCH_ROWS: usize = 1;
+pub(crate) const SEARCH_ROWS: usize = 2;
 
 pub(crate) const HELP_BUTTON: &str = "   Help   ";
 const CLOSE_BUTTON: &str = " Close ";
@@ -90,7 +90,7 @@ pub(crate) fn render_search_input(
     };
     let text = format!("{label}{left} {content}{padding} {right} \x1b[7m{SEARCH_BUTTON}\x1b[27m");
     let cursor = label.width() + 3 + tail.width();
-    ([text], cursor)
+    ([text, pad_cell("", width)], cursor)
 }
 
 const HELP_TEXT: &str = "一覧操作
@@ -878,7 +878,8 @@ mod tests {
                 let (lines, cursor) = render_search_input(&query, focused, width);
                 let label = if focused { "Keywords> " } else { "Keywords: " };
                 assert!(lines.first().is_some_and(|line| line.starts_with(label)));
-                assert_eq!(lines.len(), 1);
+                assert_eq!(lines.len(), 2);
+                assert_eq!(lines[1], " ".repeat(width));
                 assert!(lines[0].ends_with(&format!(" \x1b[7m{SEARCH_BUTTON}\x1b[27m")));
                 assert!(lines.iter().all(|line| {
                     let visible = line

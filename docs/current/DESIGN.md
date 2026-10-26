@@ -6,7 +6,7 @@
 本節の責務は必須 (MUST) とする。
 
 - `presentation` は、1行の検索欄と反転ボタンを描画する。
-- `SEARCH_ROWS` は1とする。
+- `SEARCH_ROWS` は、検索行と空行を含めて2とする。
 - `search_button_start` は、端末幅からボタンの開始列を返す。
 - `SearchState::route` は、端末幅を使用してクリックを判定する。
 - 検索後の一覧座標は、同じ `SEARCH_ROWS` で補正する。
