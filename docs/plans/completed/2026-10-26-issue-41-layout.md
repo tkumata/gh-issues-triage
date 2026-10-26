@@ -2,15 +2,18 @@
 
 ## Status
 
-- Phase: awaiting_manual_verification
+- Phase: completed
 - Approval: approved
 - Branch: `feat/issue-41`
 - Issue のタイトル: 画面調整
 - Issue の取得日: 2026-10-26
 - ユーザーは 2026-10-26 に本計画と具体案を承認した。
 - 実装、関連文書の更新、自動検証は完了した。
-- 実端末での表示、クリック、日本語 IME の確認は未実施である。
-- 実端末の受け入れを待ち、計画は active に残す。
+- ユーザーは 2026-10-26 に、追加の空行を含む動作確認を報告した。
+- ユーザーの「完了としましょう」に基づき、本変更を完了とする。
+- 実端末の受け入れは、ユーザー報告に基づく。
+- 端末名、配色、IME、各操作の確認内訳は記録されていない。
+- 本計画は `docs/plans/completed/` に移した。
 
 ## Goal
 
@@ -105,7 +108,7 @@ Keywords: [ Type keywords... ]    Search
 ### Task 1: 検索欄と Search ボタンを1行へまとめる
 
 - Status: completed
-- Validation: 自動検証成功。実端末の確認は Task 3 に残す。
+- Validation: 自動検証成功。実端末の受け入れはユーザー報告に基づく。
 - Objective: 検索部分の高さを減らす。
 - Scope: `src/presentation.rs`、`src/main.rs`、同ファイル内のテスト。
 - Acceptance Criteria:
@@ -120,7 +123,7 @@ Keywords: [ Type keywords... ]    Search
 ### Task 2: Help ボタンとダイアログを追加する
 
 - Status: completed
-- Validation: 自動検証成功。実端末の確認は Task 3 に残す。
+- Validation: 自動検証成功。実端末の受け入れはユーザー報告に基づく。
 - Objective: 操作説明を必要な場合に開けるようにする。
 - Scope: `src/presentation.rs`、`src/main.rs`、同ファイル内のテスト。
 - Acceptance Criteria:
@@ -138,8 +141,9 @@ Keywords: [ Type keywords... ]    Search
 
 ### Task 3: 操作説明を更新し、結合検証する
 
-- Status: awaiting_manual_verification
+- Status: completed
 - Result: 文書更新と自動検証は完了した。
+- Validation: ユーザーの動作確認報告と完了承認を受けた。
 - Objective: 承認済みの表示と操作を文書と実装で一致させる。
 - Scope: `README.md`、`docs/current/`、Task 1 と Task 2 の結合検証。
 - Acceptance Criteria:
@@ -172,7 +176,10 @@ Keywords: [ Type keywords... ]    Search
 - 該当なしの検索結果でも、Help からの復帰を自動検証した。
 - 下部の確認不能理由と、新しい高さ計算を自動検証した。
 - Rust の最終差分を確認し、修正を要する指摘は残っていない。
-- 実端末の配色、余白クリック、IME、操作感は未確認である。
+- 自動検証完了時点では、実端末での表示と操作は未確認だった。
+- ユーザーは、空行追加後の動作確認を報告し、完了を承認した。
+- 実端末の受け入れはユーザー報告に基づく。
+- 端末名、配色、IME、各操作の確認内訳は記録されていない。
 - 実 GitHub / Jev API を使う実装後の結合確認は未実施である。
 
 ## Open Questions
