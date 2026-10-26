@@ -25,9 +25,9 @@ use github::{GithubError, fetch_issues};
 use jev::{JevError, triage_issues, typesafe_api_key};
 use model::{IssueSort, RankedIssue, RepositoryRef, SortColumn, next_ready_issue, search_issues};
 use presentation::{
-    ButtonRegion, DisplayError, HELP_BUTTON, HelpDialog, RenderedTable, SEARCH_ROWS,
-    render_next_json, render_search_input, render_search_results, render_table_with_buttons,
-    search_button_start, terminal_height, terminal_width, wrap_line,
+    CLOSE_BUTTON, CREATE_BUTTON, Dialog, DisplayError, HELP_TEXT, LIST_BUTTONS, RenderedTable,
+    render_issue_table, render_next_json, render_search_input, render_search_results,
+    search_button_start, terminal_height, terminal_width,
 };
 
 const USER_AGENT: &str = "gh-issues-triage/0.1.0";
@@ -205,7 +205,7 @@ fn run_repository(repository: &RepositoryRef) -> Result<(), AppError> {
     } else {
         branch::local_issue_branches(repository)
     };
-    let table = render_table_with_buttons(&ranked, width, &branches, IssueSort::default())?;
+    let table = render_issue_table(&ranked, width, &branches, IssueSort::default())?;
     if ranked.is_empty() {
         println!("{}", table.text);
     } else {
@@ -310,12 +310,7 @@ enum ActionInput {
     Mouse { x: usize, y: usize },
     Hover { x: usize, y: usize },
     Wheel { x: usize, y: usize, down: bool },
-    Up,
-    Down,
-    PageUp,
-    PageDown,
     Continue,
-    Search,
     Quit,
 }
 
@@ -324,7 +319,6 @@ struct SearchState {
     draft: String,
     query: String,
     pending_utf8: Vec<u8>,
-    focused: bool,
 }
 
 #[derive(Default)]
@@ -343,7 +337,7 @@ impl ListState {
 }
 
 impl SearchState {
-    fn submit(&mut self) -> io::Result<ActionInput> {
+    fn submit(&mut self) -> io::Result<()> {
         if !self.pending_utf8.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -351,8 +345,7 @@ impl SearchState {
             ));
         }
         self.query.clone_from(&self.draft);
-        self.focused = false;
-        Ok(ActionInput::Search)
+        Ok(())
     }
 
     fn push_byte(&mut self, byte: u8) -> io::Result<()> {
@@ -374,76 +367,21 @@ impl SearchState {
         Ok(())
     }
 
-    fn route(&mut self, input: ActionInput, width: usize) -> io::Result<ActionInput> {
-        let routed = match input {
-            ActionInput::PasteByte(byte) => {
-                if self.focused {
-                    match byte {
-                        b'\t' | b'\r' | b'\n' => self.push_byte(b' ')?,
-                        32..=126 | 128..=255 => self.push_byte(byte)?,
-                        _ => {}
-                    }
-                }
-                ActionInput::Continue
-            }
-            ActionInput::Key(b'\t') => {
-                self.focused = !self.focused;
-                ActionInput::Continue
-            }
-            ActionInput::Mouse { x, y: 1 } if (search_button_start(width)..=width).contains(&x) => {
-                return self.submit();
-            }
-            ActionInput::Mouse { x, y: 1 } => {
-                if (11..search_button_start(width).saturating_sub(1)).contains(&x) {
-                    self.focused = true;
-                }
-                ActionInput::Continue
-            }
-            ActionInput::Mouse { y: 2, .. } => ActionInput::Continue,
-            ActionInput::Mouse { x, y } => {
-                self.focused = false;
-                ActionInput::Mouse {
-                    x,
-                    y: y.saturating_sub(SEARCH_ROWS),
-                }
-            }
-            ActionInput::Hover { .. }
-            | ActionInput::Up
-            | ActionInput::Down
-            | ActionInput::PageUp
-            | ActionInput::PageDown
-                if self.focused =>
-            {
-                ActionInput::Continue
-            }
-            ActionInput::Wheel { x, y, down } => ActionInput::Wheel {
-                x,
-                y: y.saturating_sub(SEARCH_ROWS),
-                down,
-            },
-            ActionInput::Hover { x, y } => ActionInput::Hover {
-                x,
-                y: y.saturating_sub(SEARCH_ROWS),
-            },
-            ActionInput::Key(b'\r' | b'\n') if self.focused => return self.submit(),
-            ActionInput::Key(8 | 127) if self.focused => {
+    fn route(&mut self, input: ActionInput) -> io::Result<()> {
+        match input {
+            ActionInput::PasteByte(b'\t' | b'\r' | b'\n') => self.push_byte(b' ')?,
+            ActionInput::Key(8 | 127) => {
                 if self.pending_utf8.is_empty() {
                     self.draft.pop();
                 } else {
                     self.pending_utf8.clear();
                 }
-                ActionInput::Continue
             }
-            ActionInput::Key(byte) if self.focused => {
-                if byte >= b' ' {
-                    self.push_byte(byte)?;
-                }
-                ActionInput::Continue
-            }
-            ActionInput::Key(b'q') => ActionInput::Quit,
-            other => other,
-        };
-        Ok(routed)
+            ActionInput::Key(byte @ (32..=126 | 128..=255))
+            | ActionInput::PasteByte(byte @ (32..=126 | 128..=255)) => self.push_byte(byte)?,
+            _ => {}
+        }
+        Ok(())
     }
 }
 
@@ -466,27 +404,6 @@ fn parse_mouse_event(sequence: &str) -> Option<ActionInput> {
             x,
             y,
             down: button == 65,
-        }),
-        _ => None,
-    }
-}
-
-fn action_for(
-    input: ActionInput,
-    buttons: &[ButtonRegion],
-    scroll: usize,
-    viewport_rows: usize,
-) -> Option<usize> {
-    match input {
-        ActionInput::Key(key @ b'1'..=b'9') => Some(usize::from(key - b'1')),
-        ActionInput::Key(b'0') => Some(9),
-        ActionInput::Mouse { x, y } => buttons.iter().find_map(|button| {
-            button
-                .line
-                .checked_sub(scroll)
-                .filter(|row| *row < viewport_rows && y == row + 1)
-                .filter(|_| (button.x_start..=button.x_end).contains(&x))
-                .map(|_| button.issue_index)
         }),
         _ => None,
     }
@@ -566,10 +483,6 @@ impl InputState {
                 ActionInput::Continue
             }
             _ if self.pasting => ActionInput::Continue,
-            b"\x1b[A" => ActionInput::Up,
-            b"\x1b[B" => ActionInput::Down,
-            b"\x1b[5~" => ActionInput::PageUp,
-            b"\x1b[6~" => ActionInput::PageDown,
             _ => sequence
                 .strip_prefix(b"\x1b[")
                 .and_then(|body| std::str::from_utf8(body).ok())
@@ -597,57 +510,28 @@ fn hovered_issue(
         .position(|issue| issue.lines.contains(&line))
 }
 
-fn first_visible_issue(
-    table: &RenderedTable,
-    scroll: usize,
-    viewport_rows: usize,
-) -> Option<usize> {
-    table.issues.iter().position(|issue| {
-        issue.lines.end > scroll && issue.lines.start < scroll.saturating_add(viewport_rows)
-    })
-}
-
-fn navigate_issue(
-    input: ActionInput,
-    table: &RenderedTable,
-    selected: Option<usize>,
-    scroll: usize,
-    viewport_rows: usize,
-) -> Option<(usize, usize)> {
-    let last = table.issues.len().checked_sub(1)?;
-    let next = match (input, selected) {
-        (ActionInput::Down | ActionInput::Key(b'j'), Some(index)) => {
-            index.saturating_add(1).min(last)
-        }
-        (ActionInput::Up | ActionInput::Key(b'k'), Some(index)) => index.saturating_sub(1),
-        (ActionInput::Up | ActionInput::Down | ActionInput::Key(b'j' | b'k'), None) => {
-            first_visible_issue(table, scroll, viewport_rows).unwrap_or(0)
-        }
-        _ => return None,
-    };
-    let issue = table.issues.get(next)?;
-    let next_scroll = if issue.lines.start < scroll || issue.lines.len() > viewport_rows {
-        issue.lines.start
-    } else {
-        scroll.max(issue.lines.end.saturating_sub(viewport_rows))
-    };
-    let max_scroll = table.text.lines().count().saturating_sub(viewport_rows);
-    Some((next, next_scroll.min(max_scroll)))
-}
-
-fn scroll_by(
-    input: ActionInput,
-    scroll: usize,
-    max_scroll: usize,
-    viewport_rows: usize,
-) -> Option<usize> {
+fn wheel_scroll(input: ActionInput, scroll: usize, max_scroll: usize) -> usize {
     match input {
-        ActionInput::Down | ActionInput::Key(b'j') => {
-            Some(scroll.saturating_add(1).min(max_scroll))
+        ActionInput::Wheel { down: true, .. } => scroll.saturating_add(1).min(max_scroll),
+        ActionInput::Wheel { down: false, .. } => scroll.saturating_sub(1),
+        _ => scroll,
+    }
+}
+
+fn list_action(input: ActionInput, height: usize) -> Option<u8> {
+    match input {
+        ActionInput::Quit => Some(b'q'),
+        ActionInput::Key(key @ (b'h' | b'q' | b's')) => Some(key),
+        ActionInput::Mouse { x, y } if y == height => {
+            let mut start = 1;
+            for (button, key) in LIST_BUTTONS.iter().zip(*b"hqs") {
+                if (start..start + button.len()).contains(&x) {
+                    return Some(key);
+                }
+                start += button.len() + 1;
+            }
+            None
         }
-        ActionInput::Up | ActionInput::Key(b'k') => Some(scroll.saturating_sub(1)),
-        ActionInput::PageDown => Some(scroll.saturating_add(viewport_rows).min(max_scroll)),
-        ActionInput::PageUp => Some(scroll.saturating_sub(viewport_rows)),
         _ => None,
     }
 }
@@ -658,13 +542,6 @@ fn visible_lines(lines: &[String], scroll: usize, rows: usize) -> Vec<&str> {
         .skip(scroll)
         .take(rows)
         .map(String::as_str)
-        .collect()
-}
-
-fn wrap_message(message: &str, width: usize) -> Vec<String> {
-    message
-        .lines()
-        .flat_map(|line| wrap_line(line, width))
         .collect()
 }
 
@@ -693,118 +570,167 @@ fn draw_view(
     stdout.flush().map_err(|error| error.to_string())
 }
 
-fn result_dismisses(input: ActionInput) -> bool {
-    matches!(input, ActionInput::Key(_) | ActionInput::Quit)
+#[derive(Debug, PartialEq, Eq)]
+enum DialogResult {
+    Closed,
+    Primary,
+    Quit,
 }
 
-fn show_result(
-    message: &str,
-    width: usize,
-    height: usize,
-    stdin: &mut impl Read,
-    stdout: &mut impl Write,
-    input_state: &mut InputState,
-) -> Result<(), String> {
-    let lines = wrap_message(message, width);
-    let help = wrap_line("j/k or arrows: scroll; any key: return", width);
-    let viewport_rows = height.saturating_sub(help.len());
-    if viewport_rows == 0 {
-        return Err("terminal is too short to show the result".to_owned());
-    }
-    let mut scroll = 0;
-    let max_scroll = lines.len().saturating_sub(viewport_rows);
-    loop {
-        draw_view(stdout, &lines, scroll, viewport_rows, &help, &[])?;
-        let input = input_state
-            .read_input(stdin)
+fn draw_dialog(stdout: &mut impl Write, dialog: &Dialog, scroll: usize) -> Result<(), String> {
+    for (row, line) in dialog.lines(scroll).iter().enumerate() {
+        write!(stdout, "\x1b[{};{}H{line}", dialog.top + row, dialog.left)
             .map_err(|error| error.to_string())?;
-        if let Some(next) = scroll_by(input, scroll, max_scroll, viewport_rows) {
-            scroll = next;
-        } else if result_dismisses(input) {
-            break;
-        }
     }
-    Ok(())
+    stdout.flush().map_err(|error| error.to_string())
 }
 
-fn show_help(
-    width: usize,
-    height: usize,
+fn show_dialog(
+    dialog: &Dialog,
     stdin: &mut impl Read,
     stdout: &mut impl Write,
     input_state: &mut InputState,
-) -> Result<bool, String> {
-    let dialog = HelpDialog::new(width, height).map_err(|error| error.to_string())?;
+) -> Result<DialogResult, String> {
     let mut scroll = 0;
     loop {
-        for (row, line) in dialog.lines(scroll).iter().enumerate() {
-            write!(stdout, "\x1b[{};{}H{line}", dialog.top + row, dialog.left)
-                .map_err(|error| error.to_string())?;
-        }
-        stdout.flush().map_err(|error| error.to_string())?;
+        draw_dialog(stdout, dialog, scroll)?;
         let input = input_state
             .read_input(stdin)
             .map_err(|error| error.to_string())?;
         match input {
-            ActionInput::Quit => return Ok(true),
-            ActionInput::Key(0x1b | b'\r' | b'\n') => return Ok(false),
-            ActionInput::Mouse { x, y } if dialog.closes_at(x, y) => return Ok(false),
-            ActionInput::Wheel { x, y, down } if dialog.content_contains(x, y) => {
-                scroll = if down {
-                    scroll.saturating_add(1).min(dialog.max_scroll())
-                } else {
-                    scroll.saturating_sub(1)
-                };
+            ActionInput::Quit => return Ok(DialogResult::Quit),
+            ActionInput::Mouse { x, y } => match dialog.button_at(x, y) {
+                Some(0) => return Ok(DialogResult::Closed),
+                Some(_) => return Ok(DialogResult::Primary),
+                None => {}
+            },
+            ActionInput::Wheel { x, y, .. } if dialog.content_contains(x, y) => {
+                scroll = wheel_scroll(input, scroll, dialog.max_scroll());
             }
-            _ => {
-                if let Some(next) = scroll_by(input, scroll, dialog.max_scroll(), dialog.rows) {
-                    scroll = next;
-                }
+            _ => {}
+        }
+    }
+}
+
+fn show_search(
+    search: &mut SearchState,
+    (width, height): (usize, usize),
+    stdin: &mut impl Read,
+    stdout: &mut impl Write,
+    input_state: &mut InputState,
+) -> Result<DialogResult, String> {
+    let dialog = Dialog::search(width, height).map_err(|error| error.to_string())?;
+    search.draft.clone_from(&search.query);
+    search.pending_utf8.clear();
+    loop {
+        draw_dialog(stdout, &dialog, 0)?;
+        let (line, cursor) = render_search_input(&search.draft, dialog.width - 4);
+        write!(
+            stdout,
+            "\x1b[{};{}H{}\x1b[{};{}H",
+            dialog.top + 3,
+            dialog.left + 2,
+            line,
+            dialog.top + 3,
+            dialog.left + 1 + cursor
+        )
+        .and_then(|()| stdout.flush())
+        .map_err(|error| error.to_string())?;
+        let input = input_state
+            .read_input(stdin)
+            .map_err(|error| error.to_string())?;
+        match input {
+            ActionInput::Quit => return Ok(DialogResult::Quit),
+            ActionInput::Mouse { x, y } if dialog.button_at(x, y) == Some(0) => {
+                search.draft.clone_from(&search.query);
+                search.pending_utf8.clear();
+                return Ok(DialogResult::Closed);
             }
+            ActionInput::Mouse { x, y }
+                if y == dialog.top + 3
+                    && (dialog.left + 1 + search_button_start(dialog.width - 4)
+                        ..dialog.left + dialog.width - 2)
+                        .contains(&x) =>
+            {
+                search.submit().map_err(|error| error.to_string())?;
+                return Ok(DialogResult::Primary);
+            }
+            _ => search.route(input).map_err(|error| error.to_string())?,
         }
     }
 }
 
 fn draw_list_view(
     stdout: &mut impl Write,
-    table: &mut RenderedTable,
+    table: &RenderedTable,
     list: &mut ListState,
-    search: &SearchState,
     height: usize,
-    width: usize,
 ) -> Result<usize, String> {
-    let mut help = table.branch_errors.clone();
-    help.push(format!("\x1b[7m{HELP_BUTTON}\x1b[27m"));
-    let viewport_rows = height.saturating_sub(help.len() + SEARCH_ROWS);
+    let mut footer = table.branch_errors.clone();
+    footer.push(
+        LIST_BUTTONS
+            .iter()
+            .map(|button| format!("\x1b[7m{button}\x1b[27m"))
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    let viewport_rows = height.saturating_sub(footer.len());
     if viewport_rows == 0 {
         return Err("terminal is too short to show issue actions".to_owned());
     }
-    let importance_rows = wrap_line("重要度: 0（低）〜4（高）", width).len();
-    table
-        .limit_rows(viewport_rows.saturating_sub(importance_rows))
-        .map_err(|error| error.to_string())?;
     let max_scroll = table.text.lines().count().saturating_sub(viewport_rows);
     list.scroll = list.scroll.min(max_scroll);
-    let (header, cursor) = render_search_input(&search.draft, search.focused, width);
     draw_view(
         stdout,
         &table.lines(list.selected),
         list.scroll,
         viewport_rows,
-        &help,
-        &header,
+        &footer,
+        &[],
     )?;
-    if search.focused {
-        write!(stdout, "\x1b[1;{cursor}H")
-            .and_then(|()| stdout.flush())
-            .map_err(|error| error.to_string())?;
-    }
     Ok(viewport_rows)
+}
+
+fn show_issue(
+    create: impl FnOnce(&RankedIssue) -> Result<String, String>,
+    issue: &RankedIssue,
+    (width, height): (usize, usize),
+    stdin: &mut impl Read,
+    stdout: &mut impl Write,
+    input_state: &mut InputState,
+) -> Result<DialogResult, String> {
+    let title = format!("#{} {}", issue.issue.number, issue.issue.title);
+    let body = format!(
+        "{}\n\nBranch: {}",
+        issue.issue.body,
+        branch::branch_name(issue)
+    );
+    let dialog = Dialog::new(width, height, &title, &body, &[CLOSE_BUTTON, CREATE_BUTTON])
+        .map_err(|error| error.to_string())?;
+    let action = show_dialog(&dialog, stdin, stdout, input_state)?;
+    if action != DialogResult::Primary {
+        return Ok(action);
+    }
+    let result = create(issue);
+    let succeeded = result.is_ok();
+    let message = result.map_or_else(
+        |error| format!("Branch creation failed: {error}"),
+        |name| format!("Created branch {name}"),
+    );
+    let dialog = Dialog::new(width, height, "Branch creation", &message, &[CLOSE_BUTTON])
+        .map_err(|error| error.to_string())?;
+    if show_dialog(&dialog, stdin, stdout, input_state)? == DialogResult::Quit {
+        Ok(DialogResult::Quit)
+    } else if succeeded {
+        Ok(DialogResult::Primary)
+    } else {
+        Ok(DialogResult::Closed)
+    }
 }
 
 fn run_branch_actions(
     repository: &RepositoryRef,
-    issues: &[model::RankedIssue],
+    issues: &[RankedIssue],
     mut table: RenderedTable,
     mut branches: Result<BTreeSet<u64>, String>,
     width: usize,
@@ -819,37 +745,53 @@ fn run_branch_actions(
     let mut input_state = InputState::default();
     let mut visible = issues.to_vec();
     loop {
-        let viewport_rows =
-            draw_list_view(&mut stdout, &mut table, &mut list, &search, height, width)?;
-        let max_scroll = table.text.lines().count().saturating_sub(viewport_rows);
+        let viewport_rows = draw_list_view(&mut stdout, &table, &mut list, height)?;
         let input = input_state
             .read_input(&mut stdin)
             .map_err(|error| error.to_string())?;
-        if matches!(input, ActionInput::Mouse { x, y } if y == height && (1..=HELP_BUTTON.len()).contains(&x))
-        {
-            if show_help(width, height, &mut stdin, &mut stdout, &mut input_state)? {
-                break;
+        match list_action(input, height) {
+            Some(b'q') => break,
+            Some(b'h') => {
+                let dialog = Dialog::new(width, height, "Help", HELP_TEXT, &[CLOSE_BUTTON])
+                    .map_err(|error| error.to_string())?;
+                if show_dialog(&dialog, &mut stdin, &mut stdout, &mut input_state)?
+                    == DialogResult::Quit
+                {
+                    break;
+                }
+                continue;
             }
-            continue;
+            Some(b's') => {
+                match show_search(
+                    &mut search,
+                    (width, height),
+                    &mut stdin,
+                    &mut stdout,
+                    &mut input_state,
+                )? {
+                    DialogResult::Quit => break,
+                    DialogResult::Primary => {
+                        visible = search_issues(issues, &search.query);
+                        list.sort.apply(&mut visible);
+                        table = render_search_results(&visible, width, &branches, list.sort)
+                            .map_err(|error| error.to_string())?;
+                        list.selected = None;
+                        list.scroll = 0;
+                    }
+                    DialogResult::Closed => {}
+                }
+                continue;
+            }
+            _ => {}
         }
-        let input = search
-            .route(input, width)
-            .map_err(|error| error.to_string())?;
-        if input == ActionInput::Quit {
-            break;
-        }
-        if input == ActionInput::Search {
-            visible = search_issues(issues, &search.query);
-            list.sort.apply(&mut visible);
-            table = render_search_results(&visible, width, &branches, list.sort)
-                .map_err(|error| error.to_string())?;
-            list.selected = None;
-            list.scroll = 0;
-            continue;
-        }
-        if let ActionInput::Wheel { x, y, down } = input {
+        if let ActionInput::Wheel { y, .. } = input {
             if (1..=viewport_rows).contains(&y) {
-                table.scroll_cell(x, list.scroll + y - 1, down);
+                list.scroll = wheel_scroll(
+                    input,
+                    list.scroll,
+                    table.text.lines().count().saturating_sub(viewport_rows),
+                );
+                list.selected = None;
             }
             continue;
         }
@@ -859,45 +801,34 @@ fn run_branch_actions(
                 .map_err(|error| error.to_string())?;
             continue;
         }
-        if let Some((index, next)) =
-            navigate_issue(input, &table, list.selected, list.scroll, viewport_rows)
-        {
-            list.selected = Some(index);
-            list.scroll = next;
-            continue;
-        }
-        if let Some(next) = scroll_by(input, list.scroll, max_scroll, viewport_rows) {
-            list.scroll = next;
-            continue;
-        }
-        if let ActionInput::Hover { x, y } = input {
-            list.selected = hovered_issue(&table, x, y, list.scroll, viewport_rows, width);
-            continue;
-        }
-        if let Some(issue) = action_for(input, &table.buttons, list.scroll, viewport_rows)
-            .and_then(|index| visible.get(index))
-        {
-            let result = branch::create_branch(repository, issue);
-            let succeeded = result.is_ok();
-            let message = result.map_or_else(
-                |error| format!("Branch creation failed: {error}"),
-                |name| format!("Created branch {name}"),
-            );
-            show_result(
-                &message,
-                width,
-                height,
-                &mut stdin,
-                &mut stdout,
-                &mut input_state,
-            )?;
-            if succeeded {
-                branches = branch::local_issue_branches(repository);
-                let mut updated = render_search_results(&visible, width, &branches, list.sort)
-                    .map_err(|error| error.to_string())?;
-                updated.preserve_cell_offsets(&table);
-                table = updated;
+        match input {
+            ActionInput::Hover { x, y } => {
+                list.selected = hovered_issue(&table, x, y, list.scroll, viewport_rows, width);
             }
+            ActionInput::Mouse { x, y } => {
+                let Some(issue) = hovered_issue(&table, x, y, list.scroll, viewport_rows, width)
+                    .and_then(|index| visible.get(index))
+                else {
+                    continue;
+                };
+                match show_issue(
+                    |issue| branch::create_branch(repository, issue),
+                    issue,
+                    (width, height),
+                    &mut stdin,
+                    &mut stdout,
+                    &mut input_state,
+                )? {
+                    DialogResult::Quit => break,
+                    DialogResult::Closed => {}
+                    DialogResult::Primary => {
+                        branches = branch::local_issue_branches(repository);
+                        table = render_search_results(&visible, width, &branches, list.sort)
+                            .map_err(|error| error.to_string())?;
+                    }
+                }
+            }
+            _ => {}
         }
     }
     terminal.restore()?;
@@ -1237,452 +1168,20 @@ mod interaction_tests {
     use super::*;
     use std::io::Cursor;
 
-    fn sorting_issues() -> [RankedIssue; 3] {
-        [42, 7, 3].map(|number| RankedIssue {
-            issue: model::Issue {
-                number,
-                title: format!("issue {number}"),
-                body: String::new(),
-                details: Some(model::test_issue_details()),
-            },
-            score: 3.0,
-            prefix: "feat".into(),
-            readiness: model::Readiness::Yes,
-        })
-    }
-
-    #[test]
-    fn header_click_boundaries_exclude_other_columns_and_preserve_the_search_draft() {
-        let issues = sorting_issues();
-        let table =
-            render_table_with_buttons(&issues, 110, &Ok(BTreeSet::new()), IssueSort::default());
-        assert!(table.is_ok());
-        let Ok(table) = table else { return };
-        assert_eq!(
-            table
-                .sort_headers
-                .iter()
-                .map(|header| header.column)
-                .collect::<Vec<_>>(),
-            [
-                SortColumn::Importance,
-                SortColumn::Number,
-                SortColumn::Author,
-                SortColumn::CreatedAt
-            ]
-        );
-        for header in &table.sort_headers {
-            for x in [header.x_start, header.x_end] {
-                for scroll in [0, 1] {
-                    let mut search = SearchState {
-                        focused: true,
-                        draft: "unapplied".into(),
-                        query: "issue".into(),
-                        ..SearchState::default()
-                    };
-                    let input = search.route(
-                        ActionInput::Mouse {
-                            x,
-                            y: header.line - scroll + 1 + SEARCH_ROWS,
-                        },
-                        110,
-                    );
-                    assert!(input.is_ok());
-                    let Ok(input) = input else { return };
-                    assert_eq!(
-                        sort_column_for(input, &table, scroll, 100),
-                        Some(header.column)
-                    );
-                    assert_eq!(search.query, "issue");
-                    assert_eq!(search.draft, "unapplied");
-                    assert!(!search.focused);
-                    assert_eq!(action_for(input, &table.buttons, scroll, 100), None);
-                }
-            }
-            for x in [header.x_start - 1, header.x_end + 1] {
-                assert_eq!(
-                    sort_column_for(
-                        ActionInput::Mouse {
-                            x,
-                            y: header.line + 1
-                        },
-                        &table,
-                        0,
-                        100
-                    ),
-                    None
-                );
-            }
-            for input in [
-                ActionInput::Hover {
-                    x: header.x_start,
-                    y: header.line + 1,
+    fn issues() -> Vec<RankedIssue> {
+        [42, 7, 3]
+            .map(|number| RankedIssue {
+                issue: model::Issue {
+                    number,
+                    title: format!("issue {number}"),
+                    body: format!("本文 {number}"),
+                    details: Some(model::test_issue_details()),
                 },
-                ActionInput::Key(b'1'),
-                ActionInput::Continue,
-            ] {
-                assert_eq!(sort_column_for(input, &table, 0, 100), None);
-            }
-            assert_eq!(
-                sort_column_for(
-                    ActionInput::Mouse {
-                        x: header.x_start,
-                        y: 1
-                    },
-                    &table,
-                    header.line + 1,
-                    100
-                ),
-                None
-            );
-            assert_eq!(
-                sort_column_for(
-                    ActionInput::Mouse {
-                        x: header.x_start,
-                        y: header.line + 1
-                    },
-                    &table,
-                    0,
-                    1
-                ),
-                None
-            );
-        }
-    }
-
-    #[test]
-    fn sorting_clears_selection_preserves_scroll_and_survives_search_and_reset() {
-        let issues = sorting_issues();
-        let mut visible = issues.to_vec();
-        let mut list = ListState {
-            selected: Some(1),
-            scroll: 1,
-            ..ListState::default()
-        };
-        list.sort_by(SortColumn::Number, &mut visible);
-        assert_eq!(list.selected, None);
-        assert_eq!(list.scroll, 1);
-        assert_eq!(
-            visible
-                .iter()
-                .map(|issue| issue.issue.number)
-                .collect::<Vec<_>>(),
-            [3, 7, 42]
-        );
-        let mut search = SearchState {
-            draft: "issue".into(),
-            ..SearchState::default()
-        };
-        assert!(search.submit().is_ok());
-        visible = search_issues(&issues, &search.query);
-        list.sort.apply(&mut visible);
-        let table = render_search_results(&visible, 110, &Ok(BTreeSet::from([42])), list.sort);
-        assert!(table.is_ok());
-        let Ok(table) = table else { return };
-        assert!(table.text.contains("番号↑"));
-        assert_eq!(
-            action_for(ActionInput::Key(b'1'), &table.buttons, 0, 100)
-                .and_then(|index| visible.get(index))
-                .map(|issue| issue.issue.number),
-            Some(3)
-        );
-        for button in &table.buttons {
-            assert_eq!(
-                action_for(
-                    ActionInput::Mouse {
-                        x: button.x_start,
-                        y: button.line + 1
-                    },
-                    &table.buttons,
-                    0,
-                    100
-                )
-                .and_then(|index| visible.get(index))
-                .map(|issue| issue.issue.number),
-                visible
-                    .get(button.issue_index)
-                    .map(|issue| issue.issue.number)
-            );
-        }
-        search.draft.clear();
-        assert!(search.submit().is_ok());
-        visible = search_issues(&issues, &search.query);
-        list.sort.apply(&mut visible);
-        assert_eq!(
-            visible
-                .iter()
-                .map(|issue| issue.issue.number)
-                .collect::<Vec<_>>(),
-            [3, 7, 42]
-        );
-    }
-
-    fn read_input(reader: &mut impl Read) -> io::Result<ActionInput> {
-        InputState::default().read_input(reader)
-    }
-
-    #[test]
-    fn pasted_newlines_tabs_and_shortcuts_never_execute_actions() {
-        let bytes = b"\x1b[200~title\n1\tqjk\x1b[201~";
-        let mut reader = Cursor::new(bytes);
-        let mut input_state = InputState::default();
-        let mut search = SearchState {
-            focused: true,
-            ..SearchState::default()
-        };
-        for _ in 0..bytes.len() {
-            let routed = input_state
-                .read_input(&mut reader)
-                .and_then(|input| search.route(input, 110));
-            assert_eq!(routed.ok(), Some(ActionInput::Continue));
-        }
-        assert_eq!(search.draft, "title 1 qjk");
-        assert_eq!(search.query, "");
-        assert!(search.focused);
-        assert_eq!(
-            input_state
-                .read_input(&mut Cursor::new(b"\r"))
-                .and_then(|input| search.route(input, 110))
-                .ok(),
-            Some(ActionInput::Search)
-        );
-        assert_eq!(search.query, "title 1 qjk");
-    }
-
-    #[test]
-    fn paste_state_survives_timeouts_and_never_dismisses_results_or_creates_branches() {
-        let mut input_state = InputState::default();
-        let mut search = SearchState::default();
-        for chunk in [
-            &b"\x1b["[..],
-            &b"200"[..],
-            &b"~"[..],
-            &b"\x03q1\t\n"[..],
-            &b"\x1b[<0;20;5M"[..],
-            &b"\x1b[20"[..],
-            &b"1~"[..],
-        ] {
-            let mut reader = Cursor::new(chunk);
-            for _ in 0..=chunk.len() {
-                let input = input_state.read_input(&mut reader);
-                assert!(input.is_ok());
-                let Ok(input) = input else { return };
-                assert!(!result_dismisses(input));
-                assert_eq!(search.route(input, 110).ok(), Some(ActionInput::Continue));
-            }
-        }
-        assert_eq!(search.draft, "");
-        assert_eq!(
-            input_state
-                .read_input(&mut Cursor::new(b"q"))
-                .and_then(|input| search.route(input, 110))
-                .ok(),
-            Some(ActionInput::Quit)
-        );
-        assert_eq!(
-            input_state.read_input(&mut Cursor::new(b"\x1b")).ok(),
-            Some(ActionInput::Key(0x1b))
-        );
-        assert_eq!(
-            input_state.read_input(&mut Cursor::new([3])).ok(),
-            Some(ActionInput::Quit)
-        );
-    }
-
-    #[test]
-    fn search_input_accepts_split_utf8_and_consumes_shortcuts_until_submitted() {
-        let mut search = SearchState::default();
-        assert_eq!(
-            search.route(ActionInput::Key(b'\t'), 110).ok(),
-            Some(ActionInput::Continue)
-        );
-        for byte in "qjk10日本🙂".bytes() {
-            let input = read_input(&mut Cursor::new([byte]));
-            assert_eq!(
-                input.and_then(|input| search.route(input, 110)).ok(),
-                Some(ActionInput::Continue)
-            );
-            assert_eq!(
-                search.route(ActionInput::Continue, 110).ok(),
-                Some(ActionInput::Continue)
-            );
-        }
-        assert_eq!(search.draft, "qjk10日本🙂");
-        assert_eq!(search.query, "");
-        for input in [ActionInput::Up, ActionInput::Down, ActionInput::PageDown] {
-            assert_eq!(search.route(input, 110).ok(), Some(ActionInput::Continue));
-        }
-        assert_eq!(
-            search.route(ActionInput::Key(127), 110).ok(),
-            Some(ActionInput::Continue)
-        );
-        assert_eq!(search.draft, "qjk10日本");
-        assert_eq!(
-            search.route(ActionInput::Key(b'\r'), 110).ok(),
-            Some(ActionInput::Search)
-        );
-        assert_eq!(search.query, "qjk10日本");
-        assert!(!search.focused);
-        assert_eq!(
-            search.route(ActionInput::Key(b'q'), 110).ok(),
-            Some(ActionInput::Quit)
-        );
-        assert!(search.route(ActionInput::Key(b'\t'), 110).is_ok());
-        assert_eq!(
-            read_input(&mut Cursor::new([3]))
-                .and_then(|input| search.route(input, 110))
-                .ok(),
-            Some(ActionInput::Quit)
-        );
-    }
-
-    #[test]
-    fn search_button_applies_the_draft_and_invalid_utf8_is_an_error() {
-        for width in [40, 80, 110] {
-            let start = search_button_start(width);
-            for x in [start, width] {
-                let mut search = SearchState {
-                    draft: "query".into(),
-                    ..SearchState::default()
-                };
-                assert_eq!(
-                    search.route(ActionInput::Mouse { x: 11, y: 1 }, width).ok(),
-                    Some(ActionInput::Continue)
-                );
-                assert!(search.focused);
-                assert_eq!(
-                    search.route(ActionInput::Mouse { x: 11, y: 2 }, width).ok(),
-                    Some(ActionInput::Continue)
-                );
-                assert!(search.focused);
-                for outside in [1, 10, start - 1, width + 1] {
-                    assert_eq!(
-                        search
-                            .route(ActionInput::Mouse { x: outside, y: 1 }, width)
-                            .ok(),
-                        Some(ActionInput::Continue)
-                    );
-                    assert_eq!(search.query, "");
-                }
-                assert_eq!(
-                    search.route(ActionInput::Mouse { x, y: 1 }, width).ok(),
-                    Some(ActionInput::Search)
-                );
-                assert_eq!(search.query, "query");
-                assert!(!search.focused);
-                assert!(search.route(ActionInput::Key(b'\t'), width).is_ok());
-                assert!(search.route(ActionInput::Key(b'x'), width).is_ok());
-                assert_eq!(search.draft, "queryx");
-                assert_eq!(search.query, "query");
-            }
-            let mut search = SearchState::default();
-            assert!(
-                search
-                    .route(ActionInput::Mouse { x: 1, y: 1 }, width)
-                    .is_ok()
-            );
-            assert!(!search.focused);
-        }
-        let mut invalid = SearchState {
-            focused: true,
-            ..SearchState::default()
-        };
-        assert!(
-            matches!(invalid.route(ActionInput::Key(0xff), 110), Err(error) if error.kind() == io::ErrorKind::InvalidData)
-        );
-        let mut incomplete = SearchState {
-            focused: true,
-            ..SearchState::default()
-        };
-        assert!(incomplete.route(ActionInput::Key(0xe6), 110).is_ok());
-        assert!(
-            matches!(incomplete.submit(), Err(error) if error.kind() == io::ErrorKind::InvalidData)
-        );
-    }
-
-    #[test]
-    fn filtered_mouse_and_number_actions_target_the_displayed_issue_and_can_reset() {
-        let all = [42, 7, 3].map(|number| RankedIssue {
-            issue: model::Issue {
-                details: Some(crate::model::test_issue_details()),
-                number,
-                title: format!("issue {number}"),
-                body: String::new(),
-            },
-            score: 3.0,
-            prefix: "fix".into(),
-            readiness: model::Readiness::Yes,
-        });
-        let mut search = SearchState {
-            draft: "7 issue".into(),
-            ..SearchState::default()
-        };
-        assert!(search.submit().is_ok());
-        let visible = search_issues(&all, &search.query);
-        let table =
-            render_search_results(&visible, 110, &Ok(BTreeSet::new()), IssueSort::default());
-        assert!(table.is_ok());
-        let Ok(table) = table else { return };
-        for button in &table.buttons {
-            let scroll = 2;
-            let click = search.route(
-                ActionInput::Mouse {
-                    x: button.x_start,
-                    y: button.line - scroll + 1 + SEARCH_ROWS,
-                },
-                110,
-            );
-            let index = click
-                .ok()
-                .and_then(|input| action_for(input, &table.buttons, scroll, 100));
-            assert_eq!(
-                index
-                    .and_then(|index| visible.get(index))
-                    .map(|issue| issue.issue.number),
-                Some(7)
-            );
-        }
-        for input in [ActionInput::Key(b'1'), ActionInput::Key(b'2')] {
-            let selected =
-                action_for(input, &table.buttons, 0, 100).and_then(|index| visible.get(index));
-            assert_eq!(
-                selected.map(|issue| issue.issue.number),
-                (input == ActionInput::Key(b'1')).then_some(7)
-            );
-        }
-        let hovered = search.route(
-            ActionInput::Hover {
-                x: 20,
-                y: table
-                    .issues
-                    .first()
-                    .map_or(0, |issue| issue.lines.start + 1 + SEARCH_ROWS),
-            },
-            110,
-        );
-        assert!(
-            matches!(hovered, Ok(ActionInput::Hover { x, y }) if hovered_issue(&table, x, y, 0, 100, 110) == Some(0))
-        );
-        search.draft = "unapplied".into();
-        let refreshed = render_search_results(
-            &search_issues(&all, &search.query),
-            110,
-            &Ok(BTreeSet::from([7])),
-            IssueSort::default(),
-        );
-        assert!(
-            matches!(refreshed, Ok(table) if table.text.contains("🌿") && table.text.contains("issue 7") && !table.text.contains("issue 42"))
-        );
-        assert_eq!(search.query, "7 issue");
-        assert!(search.submit().is_ok());
-        let missing = search_issues(&all, &search.query);
-        assert_eq!(missing, []);
-        assert!(
-            matches!(render_search_results(&missing, 110, &Ok(BTreeSet::new()), IssueSort::default()), Ok(table) if table.buttons.is_empty() && table.text.contains("No matching issues."))
-        );
-        search.draft.clear();
-        assert!(search.submit().is_ok());
-        assert_eq!(search_issues(&all, &search.query), all);
+                score: 3.0,
+                prefix: "feat".into(),
+                readiness: model::Readiness::Yes,
+            })
+            .to_vec()
     }
 
     #[test]
@@ -1723,319 +1222,6 @@ mod interaction_tests {
     }
 
     #[test]
-    fn keyboard_mouse_bounds_escape_sequences_and_restore_controls() {
-        let buttons = [
-            ButtonRegion {
-                issue_index: 0,
-                x_start: 19,
-                x_end: 21,
-                line: 4,
-            },
-            ButtonRegion {
-                issue_index: 1,
-                x_start: 19,
-                x_end: 21,
-                line: 8,
-            },
-        ];
-        assert_eq!(action_for(ActionInput::Key(b'1'), &buttons, 0, 24), Some(0));
-        assert!(matches!(
-            read_input(&mut Cursor::new(b"1")),
-            Ok(ActionInput::Key(b'1'))
-        ));
-        assert_eq!(
-            action_for(ActionInput::Mouse { x: 20, y: 5 }, &buttons, 0, 24),
-            Some(0)
-        );
-        assert_eq!(
-            action_for(ActionInput::Mouse { x: 22, y: 5 }, &buttons, 0, 24),
-            None
-        );
-        assert_eq!(
-            action_for(ActionInput::Mouse { x: 20, y: 4 }, &buttons, 0, 24),
-            None
-        );
-        assert_eq!(
-            action_for(ActionInput::Mouse { x: 20, y: 3 }, &buttons, 2, 4),
-            Some(0)
-        );
-        assert_eq!(
-            action_for(ActionInput::Mouse { x: 20, y: 3 }, &buttons, 6, 4),
-            Some(1)
-        );
-        assert_eq!(
-            action_for(ActionInput::Mouse { x: 20, y: 5 }, &buttons, 0, 4),
-            None
-        );
-        assert_eq!(scroll_by(ActionInput::Key(b'j'), 0, 9, 4), Some(1));
-        assert_eq!(scroll_by(ActionInput::Down, 8, 9, 4), Some(9));
-        assert_eq!(scroll_by(ActionInput::Key(b'k'), 0, 9, 4), Some(0));
-        assert_eq!(
-            parse_mouse_event("<0;20;5M"),
-            Some(ActionInput::Mouse { x: 20, y: 5 })
-        );
-        assert!(matches!(
-            read_input(&mut Cursor::new(b"\x1b[A")),
-            Ok(ActionInput::Up)
-        ));
-        assert!(matches!(
-            read_input(&mut Cursor::new(b"\x1b[B")),
-            Ok(ActionInput::Down)
-        ));
-        assert!(matches!(
-            read_input(&mut Cursor::new(b"\x1b[<0;20;5M")),
-            Ok(ActionInput::Mouse { x: 20, y: 5 })
-        ));
-        assert!(matches!(
-            read_input(&mut Cursor::new(b"\x1b[<35;20;5M")),
-            Ok(ActionInput::Hover { x: 20, y: 5 })
-        ));
-        assert_eq!(
-            action_for(ActionInput::Hover { x: 20, y: 5 }, &buttons, 0, 24),
-            None
-        );
-        let raw = raw_terminal(unsafe { std::mem::zeroed() });
-        assert_eq!(raw.c_lflag & (libc::ICANON | libc::ECHO | libc::ISIG), 0);
-        assert_eq!(raw.c_cc[libc::VMIN], 0);
-        assert_eq!(raw.c_cc[libc::VTIME], 1);
-        assert_eq!(
-            TERMINAL_ENTER,
-            "\x1b[?1049h\x1b[?1000h\x1b[?1003h\x1b[?1006h\x1b[?2004h"
-        );
-        assert_eq!(
-            TERMINAL_RESTORE,
-            "\x1b[?2004l\x1b[?1003l\x1b[?1000l\x1b[?1006l\x1b[?1049l"
-        );
-        let lines = vec!["one".to_owned(), "two".to_owned(), "three".to_owned()];
-        assert_eq!(visible_lines(&lines, 1, 2), ["two", "three"]);
-        let long_error = wrap_message("a very long reason", 5);
-        assert_eq!(long_error.concat(), "a very long reason");
-        assert!(long_error.len() > 1);
-        let help = wrap_line(
-            "Click a button; 1-9/0: create; j/k or arrows: scroll; q: quit",
-            26,
-        );
-        assert!(help.len() > 1);
-    }
-
-    #[test]
-    fn drawing_positions_each_row_without_scrolling_and_result_ignores_no_input() {
-        let mut output = Vec::new();
-        assert!(
-            draw_view(
-                &mut output,
-                &["table".to_owned()],
-                0,
-                2,
-                &["help".to_owned()],
-                &[],
-            )
-            .is_ok()
-        );
-        let output = String::from_utf8_lossy(&output);
-        assert!(output.contains("\x1b[1;1H\x1b[2Ktable"));
-        assert!(output.contains("\x1b[2;1H\x1b[2K"));
-        assert!(output.contains("\x1b[3;1H\x1b[2Khelp"));
-        assert!(!output.ends_with('\n'));
-        let border = "┌────┐";
-        let mut border_output = Vec::new();
-        assert!(draw_view(&mut border_output, &[border.to_owned()], 0, 1, &[], &[]).is_ok());
-        let border_output = String::from_utf8_lossy(&border_output);
-        assert!(border_output.contains("\x1b[1;1H\x1b[2K┌────┐"));
-        assert!(!border_output.contains("\x1b[K"));
-
-        let mut search_output = Vec::new();
-        let (header, _) = render_search_input("日本語", true, 40);
-        assert!(
-            draw_view(
-                &mut search_output,
-                &["table".to_owned()],
-                0,
-                2,
-                &["help".to_owned()],
-                &header,
-            )
-            .is_ok()
-        );
-        let search_output = String::from_utf8_lossy(&search_output);
-        assert!(search_output.contains("\x1b[1;1H\x1b[2KKeywords> \x1b[1m[\x1b[22m 日本語"));
-        assert!(search_output.contains("\x1b[7m   Search   \x1b[27m"));
-        assert!(search_output.contains(&format!("\x1b[2;1H\x1b[2K{}", " ".repeat(40))));
-        assert!(search_output.contains("\x1b[3;1H\x1b[2Ktable"));
-        assert!(search_output.contains("\x1b[5;1H\x1b[2Khelp"));
-
-        let no_input = read_input(&mut Cursor::new(b"")).unwrap_or(ActionInput::Quit);
-        assert_eq!(no_input, ActionInput::Continue);
-        assert!(!result_dismisses(no_input));
-        assert!(result_dismisses(ActionInput::Key(b'x')));
-    }
-
-    #[test]
-    fn help_consumes_modal_input_and_preserves_the_next_list_action() {
-        for dismiss in ["\r", "\x1b[<0;3;23M", "\x1b[<0;9;23M"] {
-            let script = format!(
-                "q1\t\x1b[<0;1;1Mj\x1b[B\x1b[6~{}\x1b[5~k{dismiss}1",
-                "j".repeat(80)
-            );
-            let mut reader = Cursor::new(script.as_bytes());
-            let mut input_state = InputState::default();
-            let mut output = Vec::new();
-            assert_eq!(
-                show_help(80, 24, &mut reader, &mut output, &mut input_state),
-                Ok(false)
-            );
-            let output = String::from_utf8_lossy(&output);
-            assert!(output.contains('┌'));
-            assert!(output.contains("Needs investigation"));
-            assert_eq!(
-                input_state.read_input(&mut reader).ok(),
-                Some(ActionInput::Key(b'1'))
-            );
-        }
-        let mut output = Vec::new();
-        let mut input_state = InputState::default();
-        for (bytes, quit) in [(&b"\x1b"[..], false), (&b"\x03"[..], true)] {
-            assert_eq!(
-                show_help(
-                    80,
-                    24,
-                    &mut Cursor::new(bytes),
-                    &mut output,
-                    &mut input_state
-                ),
-                Ok(quit)
-            );
-        }
-        for (width, height) in [(29, 24), (80, 5)] {
-            assert!(
-                show_help(
-                    width,
-                    height,
-                    &mut Cursor::new(b""),
-                    &mut output,
-                    &mut input_state
-                )
-                .is_err()
-            );
-        }
-        let mut failing_output = &mut [0_u8; 0][..];
-        assert!(
-            show_help(
-                80,
-                24,
-                &mut Cursor::new(b"\r"),
-                &mut failing_output,
-                &mut input_state
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn help_wheel_scrolls_only_content_and_stops_at_both_ends() {
-        for (width, height, left, right) in [(80, 24, 1, 80), (120, 40, 17, 104)] {
-            let Ok(dialog) = HelpDialog::new(width, height) else {
-                unreachable!();
-            };
-            let first_row = dialog.top + 3;
-            let last_row = first_row + dialog.rows - 1;
-            let mut steps = vec![
-                (format!("\x1b[<64;{};{first_row}M", left + 1), 0),
-                (format!("\x1b[<65;{};{first_row}M", left + 1), 1),
-                (format!("\x1b[<64;{};{last_row}M", right - 1), 0),
-            ];
-            for row in 1..=height {
-                if !(first_row..=last_row).contains(&row) {
-                    steps.push((format!("\x1b[<65;{};{row}M", left + 1), 0));
-                }
-            }
-            for x in [left, right, 1, width] {
-                steps.push((format!("\x1b[<65;{x};{first_row}M"), 0));
-            }
-            for next in 1..=dialog.max_scroll() + 2 {
-                steps.push((
-                    format!("\x1b[<65;{};{last_row}M", right - 1),
-                    next.min(dialog.max_scroll()),
-                ));
-            }
-            for count in 1..=dialog.max_scroll() + 2 {
-                steps.push((
-                    format!("\x1b[<64;{};{first_row}M", left + 1),
-                    dialog.max_scroll().saturating_sub(count),
-                ));
-            }
-            let mut script = String::new();
-            let mut expected = Vec::new();
-            for scroll in std::iter::once(0).chain(steps.iter().map(|(_, scroll)| *scroll)) {
-                for (row, line) in dialog.lines(scroll).iter().enumerate() {
-                    assert!(write!(expected, "\x1b[{};{}H{line}", dialog.top + row, left).is_ok());
-                }
-            }
-            for (event, _) in steps {
-                script.push_str(&event);
-            }
-            script.push_str("\r1");
-            let mut reader = Cursor::new(script.as_bytes());
-            let mut output = Vec::new();
-            let mut input_state = InputState::default();
-            assert_eq!(
-                show_help(width, height, &mut reader, &mut output, &mut input_state),
-                Ok(false)
-            );
-            assert_eq!(output, expected);
-            assert_eq!(
-                input_state.read_input(&mut reader).ok(),
-                Some(ActionInput::Key(b'1'))
-            );
-        }
-    }
-
-    #[test]
-    fn help_returns_to_the_same_filtered_list_or_empty_search_result() {
-        let mut issues = sorting_issues();
-        for issue in &mut issues {
-            issue.issue.body = "日本語 body\n".repeat(30);
-        }
-        for query in ["body", "no match"] {
-            let search = SearchState {
-                draft: "unapplied 日本語".into(),
-                query: query.into(),
-                focused: true,
-                ..SearchState::default()
-            };
-            let mut visible = search_issues(&issues, &search.query);
-            let mut list = ListState::default();
-            list.sort_by(SortColumn::Number, &mut visible);
-            let table = render_search_results(&visible, 110, &Ok(BTreeSet::new()), list.sort);
-            assert!(table.is_ok());
-            let Ok(mut table) = table else { return };
-            assert!(
-                draw_list_view(&mut Vec::new(), &mut table, &mut list, &search, 24, 110).is_ok()
-            );
-            if let Some(issue) = table.issues.first() {
-                table.scroll_cell(109, issue.lines.start, true);
-                list.selected = Some(0);
-                list.scroll = 2;
-            }
-            let mut before = Vec::new();
-            assert!(draw_list_view(&mut before, &mut table, &mut list, &search, 24, 110).is_ok());
-            assert_eq!(
-                show_help(
-                    110,
-                    24,
-                    &mut Cursor::new(b"j\x1b[6~1q\r"),
-                    &mut Vec::new(),
-                    &mut InputState::default()
-                ),
-                Ok(false)
-            );
-            let mut after = Vec::new();
-            assert!(draw_list_view(&mut after, &mut table, &mut list, &search, 24, 110).is_ok());
-            assert_eq!(after, before);
-        }
-    }
-
-    #[test]
     fn parses_mouse_motion_and_rejects_invalid_events() {
         for button in 32..=35 {
             assert_eq!(
@@ -2055,250 +1241,402 @@ mod interaction_tests {
     }
 
     #[test]
-    fn list_layout_keeps_search_errors_and_help_button_outside_the_table() {
-        let mut issues = sorting_issues();
-        for issue in &mut issues {
-            issue.issue.body = "body\n".repeat(30);
+    fn footer_buttons_have_one_space_gaps_and_old_keys_do_nothing() {
+        let mut start = 1;
+        for (button, key) in LIST_BUTTONS.iter().zip(*b"hqs") {
+            for x in start..start + button.len() {
+                assert_eq!(list_action(ActionInput::Mouse { x, y: 24 }, 24), Some(key));
+                assert_eq!(list_action(ActionInput::Mouse { x, y: 23 }, 24), None);
+            }
+            assert_eq!(
+                list_action(
+                    ActionInput::Mouse {
+                        x: start + button.len(),
+                        y: 24
+                    },
+                    24
+                ),
+                None
+            );
+            assert_eq!(list_action(ActionInput::Key(key), 24), Some(key));
+            start += button.len() + 1;
         }
-        let table = render_search_results(&issues, 110, &Ok(BTreeSet::new()), IssueSort::default());
-        assert!(table.is_ok());
-        let Ok(mut table) = table else { return };
-        let mut output = Vec::new();
-        let mut list = ListState::default();
-        let search = SearchState::default();
-        table.branch_errors = vec!["error one".to_owned(), "error two".to_owned()];
+        for key in b"jk0123456789\t\r\x1b" {
+            assert_eq!(list_action(ActionInput::Key(*key), 24), None);
+            assert_eq!(wheel_scroll(ActionInput::Key(*key), 4, 10), 4);
+        }
+        for sequence in [b"\x1b[A".as_slice(), b"\x1b[B", b"\x1b[5~", b"\x1b[6~"] {
+            assert_eq!(
+                InputState::default()
+                    .read_input(&mut Cursor::new(sequence))
+                    .ok(),
+                Some(ActionInput::Continue)
+            );
+        }
         assert_eq!(
-            draw_list_view(&mut output, &mut table, &mut list, &search, 20, 110),
-            Ok(15)
+            InputState::default().read_input(&mut Cursor::new([3])).ok(),
+            Some(ActionInput::Quit)
+        );
+    }
+
+    #[test]
+    fn search_accepts_utf8_and_paste_but_never_executes_shortcuts() {
+        let mut search = SearchState::default();
+        for byte in "日本語 hqs".bytes() {
+            assert!(search.route(ActionInput::Key(byte)).is_ok());
+        }
+        for key in [b'\t', b'\r', 0x1b] {
+            assert!(search.route(ActionInput::Key(key)).is_ok());
+        }
+        assert_eq!(search.draft, "日本語 hqs");
+        assert_eq!(search.query, "");
+        assert!(search.route(ActionInput::Key(127)).is_ok());
+        assert_eq!(search.draft, "日本語 hq");
+        for byte in b"\tq\nh" {
+            assert!(search.route(ActionInput::PasteByte(*byte)).is_ok());
+        }
+        assert_eq!(search.draft, "日本語 hq q h");
+        assert!(search.submit().is_ok());
+        assert_eq!(search.query, search.draft);
+        assert!(search.push_byte(0xe6).is_ok());
+        assert!(search.submit().is_err());
+        search.pending_utf8.clear();
+        assert!(search.push_byte(0xff).is_err());
+        search.pending_utf8.clear();
+        assert!(search.push_byte(0x1b).is_err());
+    }
+
+    #[test]
+    fn modal_ignores_keys_and_background_clicks_until_close_or_primary() {
+        let dialog = Dialog::new(
+            100,
+            24,
+            "本文",
+            &"長文\n".repeat(100),
+            &[CLOSE_BUTTON, CREATE_BUTTON],
+        )
+        .map_err(|e| e.to_string());
+        assert!(dialog.is_ok());
+        let Ok(dialog) = dialog else {
+            return;
+        };
+        let mut input = Cursor::new(format!(
+            "hqsjk\r\x1b[<0;1;24M\x1b[<0;{};{}Mtail",
+            dialog.left + 2 + CLOSE_BUTTON.len() + 1,
+            dialog.button_y
+        ));
+        let mut output = Vec::new();
+        let mut state = InputState::default();
+        assert_eq!(
+            show_dialog(&dialog, &mut input, &mut output, &mut state).ok(),
+            Some(DialogResult::Primary)
         );
         assert_eq!(
-            table
-                .issues
+            state.read_input(&mut input).ok(),
+            Some(ActionInput::Key(b't'))
+        );
+        let mut input = Cursor::new(format!("\x1b[<0;{};{}M", dialog.left + 2, dialog.button_y));
+        assert_eq!(
+            show_dialog(&dialog, &mut input, &mut output, &mut state).ok(),
+            Some(DialogResult::Closed)
+        );
+        assert_eq!(
+            show_dialog(&dialog, &mut Cursor::new([3]), &mut output, &mut state).ok(),
+            Some(DialogResult::Quit)
+        );
+        let mut full = &mut [][..];
+        assert!(show_dialog(&dialog, &mut Cursor::new([3]), &mut full, &mut state).is_err());
+    }
+
+    #[test]
+    fn search_dialog_applies_only_on_click_and_close_discards_draft() {
+        let dialog = Dialog::search(100, 24).map_err(|e| e.to_string());
+        assert!(dialog.is_ok());
+        let Ok(dialog) = dialog else {
+            return;
+        };
+        let mut search = SearchState {
+            query: "本文".into(),
+            ..SearchState::default()
+        };
+        let submit_x = dialog.left + 1 + search_button_start(dialog.width - 4);
+        let mut input = Cursor::new(format!(" 7\r\x1b[<0;{submit_x};{}M", dialog.top + 3));
+        let mut output = Vec::new();
+        assert_eq!(
+            show_search(
+                &mut search,
+                (100, 24),
+                &mut input,
+                &mut output,
+                &mut InputState::default()
+            )
+            .ok(),
+            Some(DialogResult::Primary)
+        );
+        assert_eq!(search.query, "本文 7");
+        assert_eq!(
+            search_issues(&issues(), &search.query)
                 .iter()
-                .map(|row| row.lines.len())
+                .map(|i| i.issue.number)
                 .collect::<Vec<_>>(),
-            [5, 5, 4]
+            [7]
+        );
+        let mut input = Cursor::new(format!(
+            "abc\x1b[<0;{};{}M",
+            dialog.left + 2,
+            dialog.button_y
+        ));
+        assert_eq!(
+            show_search(
+                &mut search,
+                (100, 24),
+                &mut input,
+                &mut output,
+                &mut InputState::default()
+            )
+            .ok(),
+            Some(DialogResult::Closed)
+        );
+        assert_eq!(search.draft, "本文 7");
+        assert_eq!(search.query, "本文 7");
+        search.draft.clear();
+        assert!(search.submit().is_ok());
+        assert_eq!(search_issues(&issues(), &search.query).len(), 3);
+    }
+
+    #[test]
+    fn issue_dialog_creates_only_the_displayed_issue_and_reports_success_or_failure() {
+        let issue = issues().pop();
+        assert!(issue.is_some());
+        let Some(issue) = issue else {
+            return;
+        };
+        let dialog = Dialog::new(100, 24, "", "", &[CLOSE_BUTTON, CREATE_BUTTON]);
+        assert!(dialog.is_ok());
+        let Ok(dialog) = dialog else {
+            return;
+        };
+        let close = format!("\x1b[<0;{};{}M", dialog.left + 2, dialog.button_y);
+        let create = format!(
+            "\x1b[<0;{};{}M",
+            dialog.left + 3 + CLOSE_BUTTON.len(),
+            dialog.button_y
+        );
+        for succeeded in [false, true] {
+            let mut target = None;
+            let mut output = Vec::new();
+            let mut input = Cursor::new(format!("{create}{close}"));
+            let result = show_issue(
+                |displayed| {
+                    target = Some(displayed.issue.number);
+                    if succeeded {
+                        Ok(branch::branch_name(displayed))
+                    } else {
+                        Err("test Git failure".into())
+                    }
+                },
+                &issue,
+                (100, 24),
+                &mut input,
+                &mut output,
+                &mut InputState::default(),
+            );
+            assert_eq!(target, Some(issue.issue.number));
+            assert_eq!(
+                result.ok(),
+                Some(if succeeded {
+                    DialogResult::Primary
+                } else {
+                    DialogResult::Closed
+                })
+            );
+            let output = String::from_utf8_lossy(&output);
+            assert!(output.contains(&issue.issue.title));
+            assert!(output.contains(&issue.issue.body));
+            assert!(output.contains(if succeeded {
+                "Created branch feat/issue-3"
+            } else {
+                "Branch creation failed: test Git failure"
+            }));
+        }
+        let mut invoked = false;
+        let result = show_issue(
+            |_| {
+                invoked = true;
+                Ok(String::new())
+            },
+            &issue,
+            (100, 24),
+            &mut Cursor::new(close),
+            &mut Vec::new(),
+            &mut InputState::default(),
+        );
+        assert_eq!(result.ok(), Some(DialogResult::Closed));
+        assert!(!invoked);
+    }
+
+    #[test]
+    fn dialog_wheel_is_local_and_clamped_and_paste_survives_timeouts() {
+        let dialog = Dialog::new(100, 24, "Help", "first\nsecond\nthird", &[CLOSE_BUTTON]);
+        assert!(dialog.is_ok());
+        let Ok(dialog) = dialog else {
+            return;
+        };
+        let text = (0..30)
+            .map(|i| format!("row {i:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let long = Dialog::new(100, 24, "Help", &text, &[CLOSE_BUTTON]);
+        assert!(long.is_ok());
+        let Ok(long) = long else {
+            return;
+        };
+        let mut events = format!("\x1b[<65;1;1M\x1b[<0;{};{}M", long.left + 2, long.button_y);
+        let mut output = Vec::new();
+        let mut state = InputState::default();
+        assert_eq!(
+            show_dialog(&long, &mut Cursor::new(&events), &mut output, &mut state).ok(),
+            Some(DialogResult::Closed)
         );
         let output = String::from_utf8_lossy(&output);
-        assert!(output.contains("\x1b[1;1H\x1b[2KKeywords:"));
-        assert!(output.contains("\x1b[18;1H\x1b[2Kerror one"));
-        assert!(output.contains("\x1b[19;1H\x1b[2Kerror two"));
-        assert!(output.contains("\x1b[20;1H\x1b[2K\x1b[7m   Help   \x1b[27m"));
-        assert!(draw_list_view(&mut Vec::new(), &mut table, &mut list, &search, 6, 110).is_err());
+        assert!(!output.contains("row 14"));
+        events = format!(
+            "{}{}\x1b[<0;{};{}M",
+            format!("\x1b[<65;{};{}M", long.left + 2, long.top + 3).repeat(60),
+            format!("\x1b[<64;{};{}M", long.left + 2, long.top + 3).repeat(60),
+            long.left + 2,
+            long.button_y
+        );
+        let mut output = Vec::new();
+        assert_eq!(
+            show_dialog(&long, &mut Cursor::new(events), &mut output, &mut state).ok(),
+            Some(DialogResult::Closed)
+        );
+        let output = String::from_utf8_lossy(&output);
+        assert!(output.contains("row 29"));
+        assert!(output.rfind("row 00") > output.rfind("row 29"));
+        assert_eq!(dialog.max_scroll(), 0);
+        assert_eq!(
+            state.read_input(&mut Cursor::new(b"\x1b[20")).ok(),
+            Some(ActionInput::Continue)
+        );
+        assert_eq!(
+            state.read_input(&mut Cursor::new(b"0~")).ok(),
+            Some(ActionInput::Continue)
+        );
+        assert_eq!(
+            state.read_input(&mut Cursor::new(b"q")).ok(),
+            Some(ActionInput::PasteByte(b'q'))
+        );
+        assert_eq!(
+            state.read_input(&mut Cursor::new(b"\x1b[<0;1;24M")).ok(),
+            Some(ActionInput::Continue)
+        );
+        assert_eq!(
+            state.read_input(&mut Cursor::new(b"\x1b[201~")).ok(),
+            Some(ActionInput::Continue)
+        );
+        assert!(!state.pasting);
+        let raw = raw_terminal(unsafe { std::mem::zeroed() });
+        assert_eq!(raw.c_lflag & (libc::ICANON | libc::ECHO | libc::ISIG), 0);
+        assert_eq!(raw.c_cc[libc::VMIN], 0);
+        assert_eq!(raw.c_cc[libc::VTIME], 1);
     }
 
     #[test]
-    fn wheel_routes_to_the_scrolled_cell_without_changing_keyboard_actions() {
-        let mut issues = sorting_issues();
-        for issue in &mut issues {
-            issue.issue.body = "body\n".repeat(30);
-        }
-        let table = render_search_results(&issues, 110, &Ok(BTreeSet::new()), IssueSort::default());
+    fn sorted_filtered_rows_keep_hover_click_and_branch_targets_together() {
+        let mut visible = search_issues(&issues(), "本文");
+        let mut list = ListState {
+            selected: Some(1),
+            scroll: 4,
+            ..ListState::default()
+        };
+        list.sort_by(SortColumn::Number, &mut visible);
+        assert_eq!(list.selected, None);
+        assert_eq!(list.scroll, 4);
+        let table = render_issue_table(&visible, 110, &Ok(BTreeSet::new()), list.sort)
+            .map_err(|e| e.to_string());
         assert!(table.is_ok());
-        let Ok(mut table) = table else { return };
-        assert!(table.limit_rows(9).is_ok());
-        let Some(region) = table.issues.get(1) else {
+        let Ok(table) = table else {
             return;
         };
-        let line = region.lines.start;
-        let scroll = line - 1;
-        let mut search = SearchState::default();
-        let input = search.route(
-            ActionInput::Wheel {
-                x: 109,
-                y: SEARCH_ROWS + 2,
-                down: true,
-            },
-            110,
-        );
-        assert!(matches!(
-            input,
-            Ok(ActionInput::Wheel {
-                x: 109,
-                y: 2,
-                down: true
-            })
-        ));
-        let Ok(ActionInput::Wheel { x, y, down }) = input else {
-            return;
-        };
-        table.scroll_cell(x, scroll + y - 1, down);
-        assert!(table.limit_rows(9).is_ok());
-        assert_eq!(hovered_issue(&table, x, y, scroll, 4, 110), Some(1));
-        assert_eq!(
-            action_for(ActionInput::Key(b'2'), &table.buttons, scroll, 4),
-            Some(1)
-        );
-        let before = table.text.clone();
-        assert!(navigate_issue(ActionInput::Down, &table, Some(1), scroll, 4).is_some());
-        assert_eq!(
-            scroll_by(ActionInput::PageDown, scroll, 100, 4),
-            Some(scroll + 4)
-        );
-        assert_eq!(table.text, before);
-        for _ in 0..100 {
-            table.scroll_cell(x, line, true);
-        }
-        assert!(table.limit_rows(9).is_ok());
-        assert!(table.buttons.iter().any(|button| {
-            button.issue_index == 1
-                && action_for(
-                    ActionInput::Mouse {
-                        x: button.x_start,
-                        y: button.line - scroll + 1,
-                    },
-                    &table.buttons,
-                    scroll,
-                    100,
-                ) == Some(1)
-        }));
-        let mut sorted = issues.to_vec();
-        let mut list = ListState::default();
-        list.sort_by(SortColumn::Number, &mut sorted);
-        for visible in [sorted, search_issues(&issues, "issue 7")] {
-            let reset = render_search_results(&visible, 110, &Ok(BTreeSet::new()), list.sort);
-            assert!(reset.is_ok());
-            let Ok(mut reset) = reset else { return };
-            assert!(reset.limit_rows(9).is_ok());
-            assert_eq!(reset.buttons, [] as [ButtonRegion; 0]);
-            assert!(reset.text.contains("issue"));
-        }
-    }
-
-    #[test]
-    fn navigates_every_issue_even_when_the_table_fits_the_viewport() {
-        let mut issues = [42, 43, 44].map(|number| model::RankedIssue {
-            issue: model::Issue {
-                details: Some(crate::model::test_issue_details()),
-                number,
-                title: format!("Issue {number}"),
-                body: String::new(),
-            },
-            score: 3.6,
-            prefix: "fix".to_owned(),
-            readiness: crate::model::Readiness::Yes,
-        });
-        let table =
-            render_table_with_buttons(&issues, 100, &Ok(BTreeSet::new()), IssueSort::default());
-        assert!(table.is_ok());
-        let Ok(table) = table else { return };
-        assert!(table.text.lines().count() < 100);
-        let mut selected = None;
-        for (input, expected) in [
-            (ActionInput::Key(b'j'), 0),
-            (ActionInput::Key(b'j'), 1),
-            (ActionInput::Down, 2),
-            (ActionInput::Down, 2),
-            (ActionInput::Key(b'k'), 1),
-            (ActionInput::Up, 0),
-            (ActionInput::Up, 0),
-        ] {
-            let next = navigate_issue(input, &table, selected, 0, 100);
-            assert_eq!(next, Some((expected, 0)));
-            selected = next.map(|(index, _)| index);
-        }
-        for (index, issue) in table.issues.iter().enumerate() {
-            let hovered = hovered_issue(&table, 20, issue.lines.start + 1, 0, 100, 100);
-            assert_eq!(hovered, Some(index));
+        for (index, row) in table.issues.iter().enumerate() {
             assert_eq!(
-                navigate_issue(ActionInput::Down, &table, hovered, 0, 100),
-                Some(((index + 1).min(2), 0))
-            );
-        }
-        assert_eq!(
-            navigate_issue(ActionInput::Continue, &table, selected, 0, 100),
-            None
-        );
-        for issue in &mut issues {
-            issue.issue.body = "long body\n".repeat(12);
-        }
-        let tall =
-            render_table_with_buttons(&issues, 100, &Ok(BTreeSet::new()), IssueSort::default());
-        assert!(tall.is_ok());
-        let Ok(tall) = tall else { return };
-        let mut selected = None;
-        let mut scroll = 0;
-        for expected in 0..3 {
-            let next = navigate_issue(ActionInput::Key(b'j'), &tall, selected, scroll, 4);
-            assert!(next.is_some());
-            let Some((index, next_scroll)) = next else {
-                return;
-            };
-            assert_eq!(index, expected);
-            assert!(
-                tall.issues
-                    .get(index)
-                    .is_some_and(|issue| issue.lines.start == next_scroll)
-            );
-            selected = Some(index);
-            scroll = next_scroll;
-        }
-        let empty = render_table_with_buttons(&[], 100, &Ok(BTreeSet::new()), IssueSort::default());
-        assert!(empty.is_ok());
-        let Ok(empty) = empty else { return };
-        assert_eq!(navigate_issue(ActionInput::Down, &empty, None, 0, 4), None);
-    }
-
-    #[test]
-    fn page_keys_scroll_by_viewport_and_result_arrows_still_scroll_by_line() {
-        assert!(matches!(
-            read_input(&mut Cursor::new(b"\x1b[5~")),
-            Ok(ActionInput::PageUp)
-        ));
-        assert!(matches!(
-            read_input(&mut Cursor::new(b"\x1b[6~")),
-            Ok(ActionInput::PageDown)
-        ));
-        assert_eq!(scroll_by(ActionInput::PageDown, 0, 9, 4), Some(4));
-        assert_eq!(scroll_by(ActionInput::PageDown, 8, 9, 4), Some(9));
-        assert_eq!(scroll_by(ActionInput::PageUp, 6, 9, 4), Some(2));
-        assert_eq!(scroll_by(ActionInput::PageUp, 2, 9, 4), Some(0));
-        assert_eq!(scroll_by(ActionInput::Down, 0, 9, 4), Some(1));
-        assert_eq!(scroll_by(ActionInput::Key(b'k'), 6, 9, 4), Some(5));
-    }
-
-    #[test]
-    fn locates_hovered_and_scrolled_issues() {
-        let issues = [42, 43].map(|number| model::RankedIssue {
-            issue: model::Issue {
-                details: Some(crate::model::test_issue_details()),
-                number,
-                title: "タイトル🙂".to_owned(),
-                body: "本文\n長い日本語の本文".to_owned(),
-            },
-            score: 3.6,
-            prefix: "fix".to_owned(),
-            readiness: crate::model::Readiness::Yes,
-        });
-        let table =
-            render_table_with_buttons(&issues, 100, &Ok(BTreeSet::new()), IssueSort::default());
-        assert!(table.is_ok());
-        let Ok(table) = table else { return };
-        for (index, issue) in table.issues.iter().enumerate() {
-            for line in issue.lines.clone() {
-                assert_eq!(hovered_issue(&table, 20, 1, line, 4, 100), Some(index));
-                assert_eq!(first_visible_issue(&table, line, 4), Some(index));
-            }
-            assert_eq!(hovered_issue(&table, 20, 1, issue.lines.end, 4, 100), None);
-            assert_eq!(first_visible_issue(&table, issue.lines.start - 1, 1), None);
-            assert_eq!(
-                first_visible_issue(&table, issue.lines.start - 1, 2),
+                hovered_issue(&table, 10, 1, row.lines.start, 5, 110),
                 Some(index)
             );
+            let issue = visible.get(index);
+            assert!(issue.is_some());
+            let Some(issue) = issue else {
+                return;
+            };
+            assert_eq!(
+                branch::branch_name(issue),
+                format!("feat/issue-{}", issue.issue.number)
+            );
+            assert_eq!(hovered_issue(&table, 10, 1, row.lines.end, 5, 110), None);
         }
-        assert_eq!(hovered_issue(&table, 20, 1, 0, 4, 100), None);
-        for (x, y) in [(0, 1), (101, 1), (20, 0), (20, 5)] {
-            assert_eq!(hovered_issue(&table, x, y, 4, 4, 100), None);
+        for header in &table.sort_headers {
+            assert_eq!(
+                sort_column_for(
+                    ActionInput::Mouse {
+                        x: header.x_start,
+                        y: header.line + 1
+                    },
+                    &table,
+                    0,
+                    24
+                ),
+                Some(header.column)
+            );
+            assert_eq!(
+                sort_column_for(
+                    ActionInput::Mouse {
+                        x: header.x_end + 1,
+                        y: header.line + 1
+                    },
+                    &table,
+                    0,
+                    24
+                ),
+                None
+            );
         }
-        assert_eq!(first_visible_issue(&table, 0, 4), None);
+        let mut output = Vec::new();
         assert_eq!(
-            first_visible_issue(&table, table.text.lines().count(), 4),
-            None
+            draw_list_view(&mut output, &table, &mut list, 24).ok(),
+            Some(23)
         );
-        let empty = render_table_with_buttons(&[], 100, &Ok(BTreeSet::new()), IssueSort::default());
-        assert!(empty.is_ok());
-        let Ok(empty) = empty else { return };
-        assert_eq!(first_visible_issue(&empty, 0, 24), None);
-        assert_eq!(hovered_issue(&empty, 20, 1, 0, 24, 100), None);
+        let output = String::from_utf8(output).map_err(|e| e.to_string());
+        assert!(output.is_ok());
+        let Ok(output) = output else {
+            return;
+        };
+        assert!(output.contains("\x1b[24;1H"));
+        assert!(!output.contains("Keywords"));
+        assert_eq!(
+            wheel_scroll(
+                ActionInput::Wheel {
+                    x: 1,
+                    y: 1,
+                    down: true
+                },
+                10,
+                10
+            ),
+            10
+        );
+        assert_eq!(
+            wheel_scroll(
+                ActionInput::Wheel {
+                    x: 1,
+                    y: 1,
+                    down: false
+                },
+                0,
+                10
+            ),
+            0
+        );
     }
 }
