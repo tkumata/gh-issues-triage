@@ -45,8 +45,15 @@ pub(crate) struct SortRegion {
     pub(crate) line: usize,
 }
 
-pub(crate) const SEARCH_BUTTON: &str = " Search ";
-pub(crate) const SEARCH_ROWS: usize = 3;
+pub(crate) const SEARCH_BUTTON: &str = "   Search   ";
+pub(crate) const SEARCH_ROWS: usize = 1;
+
+pub(crate) const HELP_BUTTON: &str = "   Help   ";
+const CLOSE_BUTTON: &str = " Close ";
+
+pub(crate) fn search_button_start(width: usize) -> usize {
+    width.saturating_sub(SEARCH_BUTTON.len()) + 1
+}
 
 pub(crate) fn render_search_input(
     query: &str,
@@ -54,7 +61,7 @@ pub(crate) fn render_search_input(
     width: usize,
 ) -> ([String; SEARCH_ROWS], usize) {
     let label = if focused { "Keywords> " } else { "Keywords: " };
-    let field_width = width.saturating_sub(label.width() + 4);
+    let field_width = width.saturating_sub(label.width() + 5 + SEARCH_BUTTON.len());
     let available = field_width.saturating_sub(1);
     let mut tail = "";
     for (start, _) in query.char_indices().rev() {
@@ -81,26 +88,99 @@ pub(crate) fn render_search_input(
     } else {
         content.to_owned()
     };
-    let text = format!("{label}{left} {content}{padding} {right}");
+    let text = format!("{label}{left} {content}{padding} {right} \x1b[7m{SEARCH_BUTTON}\x1b[27m");
     let cursor = label.width() + 3 + tail.width();
-    let hint = if focused {
-        "  Enter: search | Tab: list"
-    } else {
-        "  Tab: edit keywords"
-    };
-    let hint_width = width.saturating_sub(SEARCH_BUTTON.len());
-    let hint = hint.chars().take(hint_width).collect::<String>();
-    (
-        [
-            text,
-            format!(
-                "\x1b[7m{SEARCH_BUTTON}\x1b[27m{}",
-                pad_cell(&hint, hint_width)
-            ),
-            pad_cell("", width),
-        ],
-        cursor,
-    )
+    ([text], cursor)
+}
+
+const HELP_TEXT: &str = "一覧操作
+Tab: 一覧と検索入力を切り替え
+j/k・上下矢印: Issue を仮選択
+マウスオーバー: Issue を仮選択
+PageUp/PageDown: 一覧全体をスクロール
+ホイール: ポインター直下のセル内をスクロール
+重要度・番号・Author・日付の見出しクリック: 並べ替え
+同じ見出しの再クリック: 昇順と降順を切り替え
+↑: 昇順 / ↓: 降順
+Create branch のクリック: 対象 Issue のブランチを作成
+1–9/0: 表示順の先頭10件のブランチを作成
+一覧で q / Ctrl+C: 終了
+
+検索方法
+Tab または入力欄のクリック: 検索入力へ移動
+Keywords>: 入力中 / Backspace: 末尾の文字を削除
+Enter または Search: 検索を実行
+取得済み最大100件のタイトルと本文を検索
+空白区切りの AND 検索。語順は不問
+ASCII 英字の大小は区別しない
+空欄・空白だけの検索: 絞り込みを解除
+
+表示の意味
+🌿: ブランチあり / 空欄: ブランチなし / ?: 確認不能
+重要度: 0 (低) ～ 4 (高)
+Ready: 仕様整理への着手可能度
+Yes: 着手可能
+Needs information: 情報の追加が必要
+Needs investigation: 事前調査が必要";
+
+pub(crate) struct HelpDialog {
+    pub(crate) left: usize,
+    pub(crate) top: usize,
+    pub(crate) rows: usize,
+    close_y: usize,
+    width: usize,
+    content: Vec<String>,
+}
+
+impl HelpDialog {
+    pub(crate) fn new(width: usize, height: usize) -> Result<Self, DisplayError> {
+        if width < 30 {
+            return Err(DisplayError::TerminalWidthTooSmall { width });
+        }
+        if height < 6 {
+            return Err(DisplayError::TerminalHeightTooSmall);
+        }
+        let dialog_width = width.min(88);
+        let dialog_height = height.min(24);
+        let top = (height - dialog_height) / 2 + 1;
+        Ok(Self {
+            left: (width - dialog_width) / 2 + 1,
+            top,
+            rows: dialog_height - 4,
+            close_y: top + dialog_height - 2,
+            width: dialog_width,
+            content: HELP_TEXT
+                .lines()
+                .flat_map(|line| wrap_line(line, dialog_width - 4))
+                .collect(),
+        })
+    }
+
+    pub(crate) fn max_scroll(&self) -> usize {
+        self.content.len().saturating_sub(self.rows)
+    }
+
+    pub(crate) fn closes_at(&self, x: usize, y: usize) -> bool {
+        y == self.close_y && (self.left + 2..self.left + 2 + CLOSE_BUTTON.len()).contains(&x)
+    }
+
+    pub(crate) fn lines(&self, scroll: usize) -> Vec<String> {
+        let mut lines = vec![format!("┌{}┐", "─".repeat(self.width - 2))];
+        lines.push(format!(
+            "│{}│",
+            pad_cell(" Help: j/k ↑↓ PgUp/PgDn", self.width - 2)
+        ));
+        for row in 0..self.rows {
+            let text = self.content.get(scroll + row).map_or("", String::as_str);
+            lines.push(format!("│ {} │", pad_cell(text, self.width - 4)));
+        }
+        lines.push(format!(
+            "│ \x1b[7m{CLOSE_BUTTON}\x1b[27m{}│",
+            pad_cell(" Esc/Enter", self.width - 3 - CLOSE_BUTTON.len())
+        ));
+        lines.push(format!("└{}┘", "─".repeat(self.width - 2)));
+        lines
+    }
 }
 
 pub(crate) fn render_search_results(
@@ -121,7 +201,7 @@ pub(crate) struct RenderedTable {
     pub(crate) text: String,
     pub(crate) buttons: Vec<ButtonRegion>,
     pub(crate) issues: Vec<IssueRegion>,
-    pub(crate) branch_help: Vec<String>,
+    pub(crate) branch_errors: Vec<String>,
     pub(crate) sort_headers: Vec<SortRegion>,
     widths: [usize; 7],
 }
@@ -566,7 +646,7 @@ pub(crate) fn render_table_with_buttons(
             text: lines.join("\n"),
             buttons: Vec::new(),
             issues: Vec::new(),
-            branch_help: Vec::new(),
+            branch_errors: branch_errors(branches, width),
             sort_headers,
             widths,
         });
@@ -590,14 +670,14 @@ pub(crate) fn render_table_with_buttons(
         text: lines.join("\n"),
         buttons,
         issues: issue_regions,
-        branch_help: branch_help(branches, width),
+        branch_errors: branch_errors(branches, width),
         sort_headers,
         widths,
     })
 }
 
-fn branch_help(branches: &Result<BTreeSet<u64>, String>, width: usize) -> Vec<String> {
-    let mut lines = wrap_line("🌿 ブランチあり / 空欄 ブランチなし / ? 確認不能", width);
+fn branch_errors(branches: &Result<BTreeSet<u64>, String>, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
     if let Err(reason) = branches {
         for line in format!("ブランチ確認不能: {reason}").lines() {
             lines.extend(wrap_line(line, width));
@@ -792,28 +872,14 @@ mod tests {
 
     #[test]
     fn search_input_stays_one_line_and_shows_the_unicode_tail_and_cursor() {
-        for width in [30, 33, 34, 37, 40, 60] {
+        for width in [34, 37, 40, 60] {
             for focused in [false, true] {
                 let query = format!("{}末尾🙂", "長い検索語".repeat(20));
                 let (lines, cursor) = render_search_input(&query, focused, width);
                 let label = if focused { "Keywords> " } else { "Keywords: " };
                 assert!(lines.first().is_some_and(|line| line.starts_with(label)));
-                let button_line = &lines[1];
-                assert!(button_line.starts_with("\x1b[7m Search \x1b[27m  "));
-                let hint = if focused {
-                    "Enter: search | Tab: list"
-                } else {
-                    "Tab: edit keywords"
-                };
-                assert_eq!(
-                    button_line.trim_end(),
-                    format!(
-                        "\x1b[7m Search \x1b[27m  {}",
-                        &hint[..hint.len().min(width - 10)]
-                    )
-                    .trim_end()
-                );
-                assert_eq!(lines.get(2).map(|line| line.trim_end()), Some(""));
+                assert_eq!(lines.len(), 1);
+                assert!(lines[0].ends_with(&format!(" \x1b[7m{SEARCH_BUTTON}\x1b[27m")));
                 assert!(lines.iter().all(|line| {
                     let visible = line
                         .replace("\x1b[7m", "")
@@ -822,7 +888,12 @@ mod tests {
                         .replace("\x1b[22m", "");
                     visible.width() == width && !visible.contains(['\n', '\x1b'])
                 }));
-                let input = lines[0].replace("\x1b[1m", "").replace("\x1b[22m", "");
+                let input = lines[0]
+                    .split(" \x1b[7m")
+                    .next()
+                    .unwrap_or("")
+                    .replace("\x1b[1m", "")
+                    .replace("\x1b[22m", "");
                 assert!(input.starts_with(&format!("{label}[ ")));
                 assert!(input.ends_with(" ]"));
                 let before_cursor = input.trim_end_matches(']').trim_end();
@@ -843,15 +914,17 @@ mod tests {
     fn search_field_shows_a_placeholder_only_when_empty_and_highlights_its_brackets() {
         for focused in [false, true] {
             for query in ["", "日本🙂", " "] {
-                let (lines, cursor) = render_search_input(query, focused, 40);
+                let (lines, cursor) = render_search_input(query, focused, 60);
                 let input = &lines[0];
                 let visible = input
+                    .replace("\x1b[7m", "")
+                    .replace("\x1b[27m", "")
                     .replace("\x1b[1m", "")
                     .replace("\x1b[22m", "")
                     .replace("\x1b[90m", "")
                     .replace("\x1b[39m", "");
-                assert_eq!(visible.width(), 40);
-                assert!(visible.ends_with(" ]"));
+                assert_eq!(visible.width(), 60);
+                assert!(visible.ends_with(&format!(" ] {SEARCH_BUTTON}")));
                 assert_eq!(visible.contains("Type keywords..."), query.is_empty());
                 if query.is_empty() {
                     assert!(input.contains("\x1b[90mType keywords...\x1b[39m "));
@@ -862,7 +935,7 @@ mod tests {
                 assert_eq!(cursor, 13 + query.width());
                 if focused {
                     assert!(input.starts_with("Keywords> \x1b[1m[\x1b[22m "));
-                    assert!(input.ends_with(" \x1b[1m]\x1b[22m"));
+                    assert!(input.contains(" \x1b[1m]\x1b[22m \x1b[7m"));
                 } else {
                     assert!(input.starts_with("Keywords: [ "));
                     assert!(!visible.contains('\x1b'));
@@ -872,9 +945,36 @@ mod tests {
                 }
             }
         }
-        let (lines, cursor) = render_search_input("", true, 20);
+        let (lines, cursor) = render_search_input("", true, 33);
         assert!(lines[0].contains(" \x1b[90mType \x1b[39m "));
         assert_eq!(cursor, 13);
+    }
+
+    #[test]
+    fn help_dialog_fits_the_terminal_and_keeps_close_button_padding_clickable() {
+        for (width, height) in [(30, 6), (80, 24), (120, 40)] {
+            let result = HelpDialog::new(width, height);
+            assert!(result.is_ok());
+            let Ok(dialog) = result else { return };
+            for scroll in [0, dialog.max_scroll()] {
+                let lines = dialog.lines(scroll);
+                assert!(dialog.top + lines.len() - 1 <= height);
+                assert!(lines.iter().all(|line| {
+                    let visible = line.replace("\x1b[7m", "").replace("\x1b[27m", "");
+                    visible.width() == dialog.width && dialog.left + visible.width() - 1 <= width
+                }));
+            }
+            let start = dialog.left + 2;
+            let end = start + CLOSE_BUTTON.len() - 1;
+            assert!(dialog.closes_at(start, dialog.close_y));
+            assert!(dialog.closes_at(end, dialog.close_y));
+            assert!(!dialog.closes_at(start - 1, dialog.close_y));
+            assert!(!dialog.closes_at(end + 1, dialog.close_y));
+            assert!(!dialog.closes_at(start, dialog.close_y - 1));
+            assert!(dialog.max_scroll() > 0);
+        }
+        assert!(HelpDialog::new(29, 24).is_err());
+        assert!(HelpDialog::new(80, 5).is_err());
     }
 
     #[test]
@@ -1068,7 +1168,7 @@ mod tests {
     }
 
     #[test]
-    fn aligns_branch_states_and_keeps_legend_and_errors_outside_issue_regions() {
+    fn aligns_branch_states_and_keeps_errors_outside_issue_regions() {
         let issues = [
             issue(4, "first", "body"),
             issue(42, "next", ""),
@@ -1097,11 +1197,7 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(numbers, [" #4   🌿 ", " #42     ", " #420 🌿 "]);
             assert!(table.text.lines().all(|line| line.width() == width));
-            assert_eq!(
-                table.branch_help.concat(),
-                "🌿 ブランチあり / 空欄 ブランチなし / ? 確認不能"
-            );
-            assert!(table.branch_help.iter().all(|line| line.width() <= width));
+            assert_eq!(table.branch_errors, [] as [String; 0]);
             for (index, region) in table.issues.iter().enumerate() {
                 let lines = table.lines(Some(index));
                 assert!(
@@ -1133,13 +1229,13 @@ mod tests {
             assert_eq!(unknown.buttons, table.buttons);
             assert!(
                 unknown
-                    .branch_help
+                    .branch_errors
                     .concat()
                     .contains("ブランチ確認不能: root missing [31m")
             );
             assert!(
                 unknown
-                    .branch_help
+                    .branch_errors
                     .iter()
                     .all(|line| line.width() <= width && !line.chars().any(char::is_control))
             );
@@ -1148,7 +1244,10 @@ mod tests {
             render_table_with_buttons(&[], 100, &Err("root missing".into()), IssueSort::default());
         assert!(empty.is_ok());
         let Ok(empty) = empty else { return };
-        assert_eq!(empty.branch_help, [] as [String; 0]);
+        assert_eq!(
+            empty.branch_errors.concat(),
+            "ブランチ確認不能: root missing"
+        );
     }
 
     #[test]
