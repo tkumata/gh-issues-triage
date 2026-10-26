@@ -93,38 +93,60 @@ pub(crate) fn render_search_input(
     ([text, pad_cell("", width)], cursor)
 }
 
-const HELP_TEXT: &str = "
-一覧画面の操作
+const HELP_TEXT: &str = "一覧画面の操作
 
-- Tab キー: 一覧と検索入力を切り替え
-- j/k・↑↓ キー: Issue を仮選択
-- マウスオーバー: Issue を仮選択
-- PageUp/PageDown キー: 一覧全体をスクロール
-- マウスホイール: ポインター直下のセル内をスクロール
-- 重要度・番号・Author・日付の見出しクリック: 並べ替え変更
-  ↑: 昇順 / ↓: 降順
-- Create branch のクリック: 対象 Issue のブランチを作成
-  1 – 9/0: 表示順の先頭10件のブランチを作成
-- 一覧画面で q / Ctrl+C: アプリの終了
+Tab キー:
+  - Issues 一覧操作と検索入力操作を切り替えます。
+
+j/k・↑↓ キー:
+  - Issue を仮選択 (青色背景になる)
+
+マウスオーバー:
+  - Issue を仮選択 (青色背景になる)
+
+PageUp/PageDown キー:
+  - Issues 一覧全体をスクロールします。
+
+マウスホイール:
+  - マウスポインタ直下のセル (Issues 列のセル) 内をスクロールします。
+
+重要度・番号・Author・日付をクリック:
+  - それぞれのヘッダで Issues を並べ替えします。
+
+Create branch のクリック:
+  - 対象 Issue のブランチを作成
+  - 数字キー: 表示順の先頭 10 件のブランチを作成
+
+q:
+  - アプリの終了
+
 
 検索方法
 
-- Tab キーまたは入力欄のクリック: 検索入力へ移動
-- Keywords>: 入力中 / Backspace: 末尾の文字を削除
-- Enter キーまたは Search ボタンのクリックで検索を実行
-  取得済み最大 100 件のタイトルと本文を検索
-- 空白区切りの AND 検索。語順は不問
-- ASCII 英字の大小は区別しない
-- 空欄・空白だけの検索: 絞り込みを解除
+Tab キーまたは入力欄のクリック:
+  - 検索入力へ移動します。
+  - Keywords>: 入力可能
+  - Backspace: 末尾の文字を削除
+
+Enter キーまたは Search ボタンのクリックで検索を実行
+  - 空白区切りの AND 検索。語順は不問
+  - ASCII 英字の大小は区別しない
+
+空欄・空白だけの検索:
+  - 絞り込みを解除
+
 
 表示の意味
 
-- アイコンの意味
-  - 🌿: ブランチあり
-  - 空欄: ブランチなし
-  - ?: 確認不能
-- 重要度: 0 (低) ～ 4 (高)
-- Ready: 仕様整理への着手可能度
+重要度列:
+  - 0 (低) ～ 4 (高)
+
+番号列 (issue 番号)
+  - 番号 + 🌿: ブランチあり
+  - 番号のみ: ブランチなし
+  - 番号 + ?: 確認不能
+
+Ready 列: 仕様整理への着手可能度
   - Yes: 着手可能
   - Needs information: 情報の追加が必要
   - Needs investigation: 事前調査が必要";
@@ -143,7 +165,7 @@ impl HelpDialog {
         if width < 30 {
             return Err(DisplayError::TerminalWidthTooSmall { width });
         }
-        if height < 6 {
+        if height < 7 {
             return Err(DisplayError::TerminalHeightTooSmall);
         }
         let dialog_width = width.min(88);
@@ -152,7 +174,7 @@ impl HelpDialog {
         Ok(Self {
             left: (width - dialog_width) / 2 + 1,
             top,
-            rows: dialog_height - 4,
+            rows: dialog_height - 6,
             close_y: top + dialog_height - 2,
             width: dialog_width,
             content: HELP_TEXT
@@ -170,13 +192,26 @@ impl HelpDialog {
         y == self.close_y && (self.left + 2..self.left + 2 + CLOSE_BUTTON.len()).contains(&x)
     }
 
+    pub(crate) fn content_contains(&self, x: usize, y: usize) -> bool {
+        (self.left + 1..self.left + self.width - 1).contains(&x)
+            && (self.top + 3..self.top + 3 + self.rows).contains(&y)
+    }
+
     pub(crate) fn lines(&self, scroll: usize) -> Vec<String> {
         let mut lines = vec![format!("┌{}┐", "─".repeat(self.width - 2))];
-        lines.push(format!("│{}│", pad_cell(" Help:", self.width - 2)));
+        let heading = " Help: (マウスホイールでスクロール)";
+        let heading = if heading.width() <= self.width - 2 {
+            heading
+        } else {
+            " Help:"
+        };
+        lines.push(format!("│{}│", pad_cell(heading, self.width - 2)));
+        lines.push(format!("│{}│", pad_cell("", self.width - 2)));
         for row in 0..self.rows {
             let text = self.content.get(scroll + row).map_or("", String::as_str);
             lines.push(format!("│ {} │", pad_cell(text, self.width - 4)));
         }
+        lines.push(format!("│{}│", pad_cell("", self.width - 2)));
         lines.push(format!(
             "│ \x1b[7m{CLOSE_BUTTON}\x1b[27m{}│",
             pad_cell(" Esc/Enter", self.width - 3 - CLOSE_BUTTON.len())
@@ -956,13 +991,21 @@ mod tests {
 
     #[test]
     fn help_dialog_fits_the_terminal_and_keeps_close_button_padding_clickable() {
-        for (width, height) in [(30, 6), (80, 24), (120, 40)] {
+        for (width, height) in [(30, 7), (39, 24), (40, 24), (80, 24), (120, 40)] {
             let result = HelpDialog::new(width, height);
             assert!(result.is_ok());
             let Ok(dialog) = result else { return };
             for scroll in [0, dialog.max_scroll()] {
                 let lines = dialog.lines(scroll);
                 assert!(dialog.top + lines.len() - 1 <= height);
+                let blank = format!("│{}│", " ".repeat(dialog.width - 2));
+                assert_eq!(lines.get(2), Some(&blank));
+                assert_eq!(lines.get(lines.len() - 3), Some(&blank));
+                assert!(
+                    lines
+                        .get(dialog.close_y - dialog.top)
+                        .is_some_and(|line| line.contains(CLOSE_BUTTON))
+                );
                 assert!(lines.iter().all(|line| {
                     let visible = line.replace("\x1b[7m", "").replace("\x1b[27m", "");
                     visible.width() == dialog.width && dialog.left + visible.width() - 1 <= width
@@ -978,7 +1021,7 @@ mod tests {
             assert!(dialog.max_scroll() > 0);
         }
         assert!(HelpDialog::new(29, 24).is_err());
-        assert!(HelpDialog::new(80, 5).is_err());
+        assert!(HelpDialog::new(80, 6).is_err());
     }
 
     #[test]

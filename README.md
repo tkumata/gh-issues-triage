@@ -2,6 +2,8 @@
 
 GitHub Issues の最新 100 件を取得し、Jev で重要度順に並べる CLI ツールです。
 
+![GitHub Issues Triage](./docs/images/gh-issues-triage-screenshot.png)
+
 ## Components
 
 ![components](./docs/images/gh-issues-triage-components.png)
@@ -208,5 +210,3 @@ root は `XDG_CONFIG_HOME/gh-issues-triage/config.json`、
 GitHub または TypeSafe の応答、認証情報、端末幅の取得に失敗した場合は、途中結果を表示せず非ゼロで終了します。
 実 GitHub App の認証と TypeSafe API の確認は、自動テストとは別に行います。
 一覧のハイライトと操作は、2026-10-01 にユーザーが実端末で動作確認済みです。
-
-![GitHub Issues Triage](./docs/images/gh-issues-triage-screenshot.png)
