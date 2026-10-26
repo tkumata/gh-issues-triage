@@ -778,7 +778,7 @@ Open Questions:
 本節の設計を必須 (MUST) とする。
 
 - `src/presentation.rs` は、反転表示と Help の案内を描画する。
-- `SEARCH_BUTTON` は、装飾を含まない `   Search   ` とする。
+- `SEARCH_BUTTON` は、装飾を含まない `Search` とする。
 - 描画時に、ボタンへ ANSI の反転属性を付ける。
 - 描画時に、ボタンの直後で反転属性を解除する。
 - ANSI 制御列を、表示幅とクリック幅の計算に含めない。
