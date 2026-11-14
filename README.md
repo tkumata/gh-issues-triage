@@ -12,7 +12,7 @@ private repository を使う場合は、GitHub App を対象 repository に inst
 
 ## Environment
 
-- Rust (edition 2024)
+- Rust 1.100 以上 (edition 2024)
 - `reqwest` crate
 - `GITHUB_CLIENT_ID`: GitHub App client ID (token 更新と Device Flow 用)
 - `TYPESAFE_API_KEY`: TypeSafe Jev API key (Issue triage 用)
