@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::model::{IssueSort, RankedIssue, RepositoryRef, SortColumn};
+use crate::model::{IssueSort, RankedIssue, RepositoryRef, SortColumn, branch_name};
 
 pub(crate) fn render_next_json(
     repository: &RepositoryRef,
@@ -16,7 +16,7 @@ pub(crate) fn render_next_json(
             "body": ranked.issue.body,
             "score": ranked.score,
             "readiness": ranked.readiness.label(),
-            "branch_name": crate::branch::branch_name(ranked),
+            "branch_name": branch_name(ranked),
         })
     });
     serde_json::to_string(&value)

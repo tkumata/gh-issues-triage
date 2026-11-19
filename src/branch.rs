@@ -1,13 +1,17 @@
 use std::{
     collections::BTreeSet,
     env, fs,
+    io::{ErrorKind, Write},
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     process::Command,
 };
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{RankedIssue, RepositoryRef, issue_branch_number};
+use crate::model::{RankedIssue, RepositoryRef, branch_name, issue_branch_number};
+
+const LOCAL_MAIN: &str = "refs/heads/main";
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Config {
@@ -30,13 +34,62 @@ pub(crate) fn set_root(root: &Path) -> Result<(), String> {
 }
 
 fn write_config(path: &Path, root: &Path) -> Result<(), String> {
-    fs::create_dir_all(path.parent().ok_or("invalid config path")?)
-        .map_err(|error| format!("cannot create config directory: {error}"))?;
     let json = serde_json::to_vec(&Config {
         root: root.to_path_buf(),
     })
     .map_err(|error| format!("cannot encode config: {error}"))?;
-    fs::write(path, json).map_err(|error| format!("cannot save config: {error}"))
+    let directory = path.parent().ok_or("invalid config path")?;
+    fs::create_dir_all(directory)
+        .map_err(|error| format!("cannot create config directory: {error}"))?;
+    let (path, permissions) = config_destination(path)?;
+    let directory = path.parent().ok_or("invalid config destination")?;
+    let mut attempt = 0u64;
+    let (temporary_path, mut file) = loop {
+        let temporary_path =
+            directory.join(format!(".config-{}-{attempt}.tmp", std::process::id()));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary_path)
+        {
+            Ok(file) => break (temporary_path, file),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => attempt += 1,
+            Err(error) => return Err(format!("cannot create temporary config: {error}")),
+        }
+    };
+    let written = file
+        .write_all(&json)
+        .and_then(|()| permissions.map_or(Ok(()), |mode| file.set_permissions(mode)))
+        .and_then(|()| file.sync_all());
+    drop(file);
+    if let Err(error) = written.and_then(|()| fs::rename(&temporary_path, &path)) {
+        if let Err(cleanup) = fs::remove_file(&temporary_path) {
+            return Err(format!(
+                "cannot save config: {error}; cannot remove temporary config: {cleanup}"
+            ));
+        }
+        return Err(format!("cannot save config: {error}"));
+    }
+    Ok(())
+}
+
+fn config_destination(path: &Path) -> Result<(PathBuf, Option<fs::Permissions>), String> {
+    let mut path = path.to_path_buf();
+    for _ in 0..40 {
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_symlink() => {
+                let target = fs::read_link(&path)
+                    .map_err(|error| format!("cannot read config symlink: {error}"))?;
+                path.set_file_name(target);
+            }
+            Ok(metadata) if metadata.is_file() => return Ok((path, Some(metadata.permissions()))),
+            Ok(_) => return Err("config destination is not a regular file".to_owned()),
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok((path, None)),
+            Err(error) => return Err(format!("cannot check config destination: {error}")),
+        }
+    }
+    Err("too many config symlinks".to_owned())
 }
 
 fn root() -> Result<PathBuf, String> {
@@ -51,10 +104,6 @@ fn read_config(path: &Path) -> Result<PathBuf, String> {
         return Err("configured root is not an existing absolute directory".to_owned());
     }
     Ok(config.root)
-}
-
-pub(crate) fn branch_name(issue: &RankedIssue) -> String {
-    format!("{}/issue-{}", issue.prefix, issue.issue.number)
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
@@ -147,22 +196,23 @@ fn create_branch_at(
     issue: &RankedIssue,
 ) -> Result<String, String> {
     let directory = repository_directory(root, repository)?;
-    git(
-        &directory,
-        &["show-ref", "--verify", "--quiet", "refs/heads/main"],
-    )
-    .map_err(|_| "local main branch does not exist".to_owned())?;
+    git(&directory, &["show-ref", "--verify", LOCAL_MAIN])
+        .map_err(|error| format!("cannot verify local main branch: {error}"))?;
     let name = branch_name(issue);
     git(&directory, &["check-ref-format", "--branch", &name])
         .map_err(|_| "generated branch name is invalid".to_owned())?;
-    git(&directory, &["checkout", "--no-track", "-b", &name, "main"])
-        .map_err(|error| format!("could not create branch: {error}"))?;
+    git(
+        &directory,
+        &["checkout", "--no-track", "-b", &name, LOCAL_MAIN],
+    )
+    .map_err(|error| format!("could not create branch: {error}"))?;
     Ok(name)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::{PermissionsExt, symlink};
     use std::process;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -216,6 +266,7 @@ mod tests {
         fs::write(repo.join("file"), "work")?;
         run(&repo, &["add", "file"])?;
         run(&repo, &["commit", "-m", "work change"])?;
+        run(&repo, &["tag", "main"])?;
         let issue = RankedIssue {
             issue: crate::model::Issue {
                 details: Some(crate::model::test_issue_details()),
@@ -275,6 +326,11 @@ mod tests {
         check(read_config(&config).is_err(), "missing root was accepted")?;
         write_config(&config, &root)?;
         check(read_config(&config)? == root, "saved root did not reload")?;
+        write_config(&config, &temp)?;
+        check(
+            read_config(&config)? == temp,
+            "new root did not replace saved root",
+        )?;
 
         let repo = root.join("repo");
         fs::create_dir(&repo)?;
@@ -339,6 +395,31 @@ mod tests {
             )
             .is_err(),
             "remote mismatch was accepted",
+        )?;
+        fs::remove_dir_all(temp)?;
+        Ok(())
+    }
+
+    #[test]
+    fn saves_to_config_symlink_without_replacing_it_or_changing_permissions()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = temp_dir()?;
+        let config = temp.join("config.json");
+        let target = temp.join("target.json");
+        symlink("target.json", &config)?;
+        write_config(&config, &temp)?;
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o640))?;
+        let new_root = temp.join("projects");
+        fs::create_dir(&new_root)?;
+        write_config(&config, &new_root)?;
+        check(config.is_symlink(), "config symlink was replaced")?;
+        check(
+            read_config(&target)? == new_root,
+            "symlink target was not updated",
+        )?;
+        check(
+            fs::metadata(&target)?.permissions().mode() & 0o777 == 0o640,
+            "config permissions changed",
         )?;
         fs::remove_dir_all(temp)?;
         Ok(())

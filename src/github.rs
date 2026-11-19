@@ -88,13 +88,7 @@ fn parse_issue_details(
     })
 }
 
-fn parse_github_issues_page(
-    status: u16,
-    body: &str,
-) -> Result<Vec<GithubIssueResponse>, GithubError> {
-    if !(200..300).contains(&status) {
-        return Err(GithubError::HttpStatus { status });
-    }
+fn parse_github_issues_page(body: &str) -> Result<Vec<GithubIssueResponse>, GithubError> {
     serde_json::from_str(body).map_err(|error| {
         if error.is_data() {
             GithubError::InvalidResponse
@@ -169,10 +163,13 @@ pub(crate) fn fetch_issues(
                 timeout: error.is_timeout(),
             })?;
         let status = response.status().as_u16();
+        if !response.status().is_success() {
+            return Err(GithubError::HttpStatus { status });
+        }
         let body = response.text().map_err(|error| GithubError::HttpRequest {
             timeout: error.is_timeout(),
         })?;
-        let page_items = parse_github_issues_page(status, &body)?;
+        let page_items = parse_github_issues_page(&body)?;
         let page_len = page_items.len();
         append_github_issues(&mut issues, page_items, include_details)?;
         if page_len < GITHUB_PAGE_SIZE as usize {
@@ -196,7 +193,6 @@ mod tests {
 
     fn collect_response(value: &Value, include_details: bool) -> Result<Vec<Issue>, GithubError> {
         let items = parse_github_issues_page(
-            200,
             &json!([value,
                 {"number":99,"title":"pr","body":null,"pull_request":{},"user":false}
             ])
@@ -290,7 +286,6 @@ mod tests {
     #[test]
     fn parses_github_pages_and_excludes_pull_requests() {
         assert!(parse_github_issues_page(
-            200,
             r#"[{"number":1,"title":"issue","body":null},{"number":2,"title":"pr","body":"x","pull_request":{"url":"x"}}]"#
         )
         .is_ok_and(|items| {
@@ -305,15 +300,11 @@ mod tests {
                 })
         }));
         assert!(matches!(
-            parse_github_issues_page(403, "[]"),
-            Err(GithubError::HttpStatus { status: 403 })
-        ));
-        assert!(matches!(
-            parse_github_issues_page(200, "not-json"),
+            parse_github_issues_page("not-json"),
             Err(GithubError::InvalidJson)
         ));
         assert!(matches!(
-            parse_github_issues_page(200, "{}"),
+            parse_github_issues_page("{}"),
             Err(GithubError::InvalidResponse)
         ));
     }
