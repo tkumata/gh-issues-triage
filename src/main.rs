@@ -23,7 +23,9 @@ use cli::{Command, USAGE, parse_args};
 use credentials::CredentialError;
 use github::{GithubError, fetch_issues};
 use jev::{JevError, triage_issues, typesafe_api_key};
-use model::{IssueSort, RankedIssue, RepositoryRef, SortColumn, next_ready_issue, search_issues};
+use model::{
+    IssueSort, RankedIssue, RepositoryRef, SortColumn, branch_name, next_ready_issue, search_issues,
+};
 use presentation::{
     CLOSE_BUTTON, CREATE_BUTTON, Dialog, DisplayError, HELP_TEXT, LIST_BUTTONS, RenderedTable,
     render_issue_table, render_next_json, render_search_input, render_search_results,
@@ -124,19 +126,23 @@ fn device_authorize(
 }
 
 fn fetch_authenticated_issues(
-    stored: &credentials::Credentials,
+    stored: Option<&credentials::Credentials>,
     notice: &mut dyn Write,
     mut fetch: impl FnMut(&str) -> Result<Vec<model::Issue>, GithubError>,
     refresh: impl FnOnce(&str) -> Result<auth::TokenSet, AuthError>,
     authorize: impl FnOnce(&mut dyn Write) -> Result<credentials::Credentials, AppError>,
     save: impl FnOnce(&credentials::Credentials) -> Result<(), CredentialError>,
 ) -> Result<Vec<model::Issue>, AppError> {
-    match fetch(&stored.access_token) {
-        Ok(issues) => return Ok(issues),
-        Err(GithubError::HttpStatus { status: 401 }) => {}
-        Err(error) => return Err(error.into()),
-    }
-    let renewed = if let Some(refresh_token) = stored.refresh_token.as_deref() {
+    let refresh_token = if let Some(stored) = stored {
+        match fetch(&stored.access_token) {
+            Ok(issues) => return Ok(issues),
+            Err(GithubError::HttpStatus { status: 401 }) => stored.refresh_token.as_deref(),
+            Err(error) => return Err(error.into()),
+        }
+    } else {
+        None
+    };
+    let renewed = if let Some(refresh_token) = refresh_token {
         match refresh(refresh_token) {
             Ok(tokens) => credentials::Credentials {
                 access_token: tokens.access_token,
@@ -172,15 +178,8 @@ fn load_ranked_issues(
         Err(CredentialError::NotLoggedIn) => None,
         Err(error) => return Err(AppError::Credential(error)),
     };
-    let stored = if let Some(credentials) = stored {
-        credentials
-    } else {
-        let credentials = device_authorize(&client, notice)?;
-        credentials::save_credentials(&credentials)?;
-        credentials
-    };
     let issues = fetch_authenticated_issues(
-        &stored,
+        stored.as_ref(),
         notice,
         |token| fetch_issues(&client, token, repository, include_details),
         |refresh_token| {
@@ -207,7 +206,7 @@ fn run_repository(repository: &RepositoryRef) -> Result<(), AppError> {
     };
     let table = render_issue_table(&ranked, width, &branches, IssueSort::default())?;
     if ranked.is_empty() {
-        println!("{}", table.text);
+        write_line(&mut io::stdout().lock(), &table.text)?;
     } else {
         run_branch_actions(repository, &ranked, table, branches, width)
             .map_err(AppError::Interaction)?;
@@ -221,7 +220,11 @@ fn write_next_json(
     output: &mut impl Write,
 ) -> Result<(), AppError> {
     let json = render_next_json(repository, next_ready_issue(ranked)).map_err(AppError::Json)?;
-    writeln!(output, "{json}").map_err(AppError::Output)?;
+    write_line(output, &json)
+}
+
+fn write_line(output: &mut impl Write, text: &str) -> Result<(), AppError> {
+    writeln!(output, "{text}").map_err(AppError::Output)?;
     output.flush().map_err(AppError::Output)
 }
 
@@ -333,6 +336,34 @@ impl ListState {
         self.sort.toggle(column);
         self.sort.apply(visible);
         self.selected = None;
+    }
+
+    fn update_pointer(
+        &mut self,
+        input: ActionInput,
+        table: &RenderedTable,
+        viewport_rows: usize,
+        width: usize,
+    ) -> bool {
+        let (scroll, selected) = match input {
+            ActionInput::Wheel { y, .. } if (1..=viewport_rows).contains(&y) => (
+                wheel_scroll(
+                    input,
+                    self.scroll,
+                    table.text.lines().count().saturating_sub(viewport_rows),
+                ),
+                None,
+            ),
+            ActionInput::Hover { x, y } => (
+                self.scroll,
+                hovered_issue(table, x, y, self.scroll, viewport_rows, width),
+            ),
+            _ => return false,
+        };
+        let changed = (scroll, selected) != (self.scroll, self.selected);
+        self.scroll = scroll;
+        self.selected = selected;
+        changed
     }
 }
 
@@ -592,8 +623,8 @@ fn show_dialog(
     input_state: &mut InputState,
 ) -> Result<DialogResult, String> {
     let mut scroll = 0;
+    draw_dialog(stdout, dialog, scroll)?;
     loop {
-        draw_dialog(stdout, dialog, scroll)?;
         let input = input_state
             .read_input(stdin)
             .map_err(|error| error.to_string())?;
@@ -605,7 +636,11 @@ fn show_dialog(
                 None => {}
             },
             ActionInput::Wheel { x, y, .. } if dialog.content_contains(x, y) => {
-                scroll = wheel_scroll(input, scroll, dialog.max_scroll());
+                let next_scroll = wheel_scroll(input, scroll, dialog.max_scroll());
+                if next_scroll != scroll {
+                    scroll = next_scroll;
+                    draw_dialog(stdout, dialog, scroll)?;
+                }
             }
             _ => {}
         }
@@ -622,20 +657,23 @@ fn show_search(
     let dialog = Dialog::search(width, height).map_err(|error| error.to_string())?;
     search.draft.clone_from(&search.query);
     search.pending_utf8.clear();
+    draw_dialog(stdout, &dialog, 0)?;
+    let mut redraw_input = true;
     loop {
-        draw_dialog(stdout, &dialog, 0)?;
-        let (line, cursor) = render_search_input(&search.draft, dialog.width - 4);
-        write!(
-            stdout,
-            "\x1b[{};{}H{}\x1b[{};{}H",
-            dialog.top + 3,
-            dialog.left + 2,
-            line,
-            dialog.top + 3,
-            dialog.left + 1 + cursor
-        )
-        .and_then(|()| stdout.flush())
-        .map_err(|error| error.to_string())?;
+        if redraw_input {
+            let (line, cursor) = render_search_input(&search.draft, dialog.width - 4);
+            write!(
+                stdout,
+                "\x1b[{};{}H{}\x1b[{};{}H",
+                dialog.top + 3,
+                dialog.left + 2,
+                line,
+                dialog.top + 3,
+                dialog.left + 1 + cursor
+            )
+            .and_then(|()| stdout.flush())
+            .map_err(|error| error.to_string())?;
+        }
         let input = input_state
             .read_input(stdin)
             .map_err(|error| error.to_string())?;
@@ -655,7 +693,11 @@ fn show_search(
                 search.submit().map_err(|error| error.to_string())?;
                 return Ok(DialogResult::Primary);
             }
-            _ => search.route(input).map_err(|error| error.to_string())?,
+            _ => {
+                let previous_len = search.draft.len();
+                search.route(input).map_err(|error| error.to_string())?;
+                redraw_input = previous_len != search.draft.len();
+            }
         }
     }
 }
@@ -700,11 +742,7 @@ fn show_issue(
     input_state: &mut InputState,
 ) -> Result<DialogResult, String> {
     let title = format!("#{} {}", issue.issue.number, issue.issue.title);
-    let body = format!(
-        "{}\n\nBranch: {}",
-        issue.issue.body,
-        branch::branch_name(issue)
-    );
+    let body = format!("{}\n\nBranch: {}", issue.issue.body, branch_name(issue));
     let dialog = Dialog::new(width, height, &title, &body, &[CLOSE_BUTTON, CREATE_BUTTON])
         .map_err(|error| error.to_string())?;
     let action = show_dialog(&dialog, stdin, stdout, input_state)?;
@@ -744,8 +782,15 @@ fn run_branch_actions(
     let mut search = SearchState::default();
     let mut input_state = InputState::default();
     let mut visible = issues.to_vec();
+    let mut drawn_rows = None;
     loop {
-        let viewport_rows = draw_list_view(&mut stdout, &table, &mut list, height)?;
+        let viewport_rows = if let Some(rows) = drawn_rows {
+            rows
+        } else {
+            let rows = draw_list_view(&mut stdout, &table, &mut list, height)?;
+            drawn_rows = Some(rows);
+            rows
+        };
         let input = input_state
             .read_input(&mut stdin)
             .map_err(|error| error.to_string())?;
@@ -759,6 +804,7 @@ fn run_branch_actions(
                 {
                     break;
                 }
+                drawn_rows = None;
                 continue;
             }
             Some(b's') => {
@@ -780,31 +826,19 @@ fn run_branch_actions(
                     }
                     DialogResult::Closed => {}
                 }
+                drawn_rows = None;
                 continue;
             }
             _ => {}
-        }
-        if let ActionInput::Wheel { y, .. } = input {
-            if (1..=viewport_rows).contains(&y) {
-                list.scroll = wheel_scroll(
-                    input,
-                    list.scroll,
-                    table.text.lines().count().saturating_sub(viewport_rows),
-                );
-                list.selected = None;
-            }
-            continue;
         }
         if let Some(column) = sort_column_for(input, &table, list.scroll, viewport_rows) {
             list.sort_by(column, &mut visible);
             table = render_search_results(&visible, width, &branches, list.sort)
                 .map_err(|error| error.to_string())?;
+            drawn_rows = None;
             continue;
         }
         match input {
-            ActionInput::Hover { x, y } => {
-                list.selected = hovered_issue(&table, x, y, list.scroll, viewport_rows, width);
-            }
             ActionInput::Mouse { x, y } => {
                 let Some(issue) = hovered_issue(&table, x, y, list.scroll, viewport_rows, width)
                     .and_then(|index| visible.get(index))
@@ -827,7 +861,9 @@ fn run_branch_actions(
                             .map_err(|error| error.to_string())?;
                     }
                 }
+                drawn_rows = None;
             }
+            _ if list.update_pointer(input, &table, viewport_rows, width) => drawn_rows = None,
             _ => {}
         }
     }
@@ -836,8 +872,14 @@ fn run_branch_actions(
 }
 
 fn main() {
-    let args: Vec<String> = env::args().skip(1).collect();
-    let command = match parse_args(&args) {
+    let args = env::args_os()
+        .skip(1)
+        .map(|arg| {
+            arg.into_string()
+                .map_err(|_| "arguments must be valid UTF-8".to_owned())
+        })
+        .collect::<Result<Vec<_>, _>>();
+    let command = match args.and_then(|args| parse_args(&args)) {
         Ok(command) => command,
         Err(reason) => {
             eprintln!("error: {reason}\n{USAGE}");
@@ -845,10 +887,7 @@ fn main() {
         }
     };
     let result = match command {
-        Command::Help => {
-            println!("{USAGE}");
-            return;
-        }
+        Command::Help => write_line(&mut io::stdout().lock(), USAGE),
         Command::Repository(repository) => run_repository(&repository),
         Command::Next(repository) => run_next(&repository),
         Command::SetRoot(root) => branch::set_root(&root).map_err(AppError::Interaction),
@@ -865,7 +904,7 @@ mod auth_tests {
     use std::cell::RefCell;
 
     struct Scenario {
-        stored: credentials::Credentials,
+        stored: Option<credentials::Credentials>,
         fetches: Vec<Result<Vec<model::Issue>, GithubError>>,
         refresh: Result<auth::TokenSet, AuthError>,
         authorize: Result<credentials::Credentials, AppError>,
@@ -875,10 +914,10 @@ mod auth_tests {
     impl Default for Scenario {
         fn default() -> Self {
             Self {
-                stored: credentials::Credentials {
+                stored: Some(credentials::Credentials {
                     access_token: "saved-access".into(),
                     refresh_token: Some("saved-refresh".into()),
-                },
+                }),
                 fetches: vec![Err(GithubError::HttpStatus { status: 401 }), Ok(vec![])],
                 refresh: Ok(auth::TokenSet {
                     access_token: "refreshed-access".into(),
@@ -905,7 +944,7 @@ mod auth_tests {
             let mut fetches = self.fetches.into_iter();
             let mut notice = Vec::new();
             let result = fetch_authenticated_issues(
-                &self.stored,
+                self.stored.as_ref(),
                 &mut notice,
                 |token| {
                     events.borrow_mut().push(format!("fetch:{token}"));
@@ -934,6 +973,27 @@ mod auth_tests {
                 notice,
             }
         }
+    }
+
+    #[test]
+    fn first_authorization_saves_and_fetches_once_even_when_unauthorized() {
+        let outcome = Scenario {
+            stored: None,
+            ..Scenario::default()
+        }
+        .run();
+        assert!(matches!(
+            outcome.result,
+            Err(AppError::Github(GithubError::HttpStatus { status: 401 }))
+        ));
+        assert_eq!(
+            outcome.events,
+            [
+                "authorize",
+                "save:authorized-access:authorized-refresh",
+                "fetch:authorized-access"
+            ]
+        );
     }
 
     #[test]
@@ -1009,9 +1069,14 @@ mod auth_tests {
 
     #[test]
     fn absent_refresh_token_uses_device_flow_without_refresh() {
-        let mut scenario = Scenario::default();
-        scenario.stored.refresh_token = None;
-        let outcome = scenario.run();
+        let outcome = Scenario {
+            stored: Some(credentials::Credentials {
+                access_token: "saved-access".into(),
+                refresh_token: None,
+            }),
+            ..Scenario::default()
+        }
+        .run();
         assert!(outcome.result.is_ok());
         assert_eq!(
             outcome.events,
@@ -1115,7 +1180,7 @@ mod auth_tests {
     fn failed_reauthorization_notice_stops_before_device_flow() {
         let authorized = std::cell::Cell::new(false);
         let result = fetch_authenticated_issues(
-            &Scenario::default().stored,
+            Scenario::default().stored.as_ref(),
             &mut io::Cursor::new([]),
             |_| Err(GithubError::HttpStatus { status: 401 }),
             |_| {
@@ -1331,6 +1396,7 @@ mod interaction_tests {
             show_dialog(&dialog, &mut input, &mut output, &mut state).ok(),
             Some(DialogResult::Primary)
         );
+        assert_eq!(String::from_utf8_lossy(&output).matches("本文").count(), 1);
         assert_eq!(
             state.read_input(&mut input).ok(),
             Some(ActionInput::Key(b't'))
@@ -1374,6 +1440,12 @@ mod interaction_tests {
             Some(DialogResult::Primary)
         );
         assert_eq!(search.query, "本文 7");
+        assert_eq!(
+            String::from_utf8_lossy(&output)
+                .matches("Keywords>")
+                .count(),
+            3
+        );
         assert_eq!(
             search_issues(&issues(), &search.query)
                 .iter()
@@ -1430,7 +1502,7 @@ mod interaction_tests {
                 |displayed| {
                     target = Some(displayed.issue.number);
                     if succeeded {
-                        Ok(branch::branch_name(displayed))
+                        Ok(branch_name(displayed))
                     } else {
                         Err("test Git failure".into())
                     }
@@ -1571,7 +1643,7 @@ mod interaction_tests {
                 return;
             };
             assert_eq!(
-                branch::branch_name(issue),
+                branch_name(issue),
                 format!("feat/issue-{}", issue.issue.number)
             );
             assert_eq!(hovered_issue(&table, 10, 1, row.lines.end, 5, 110), None);

@@ -234,7 +234,8 @@ pub(crate) fn triage_issues(
         return Ok(Vec::new());
     }
     let payload = build_jev_request(&issues);
-    for attempt in 0..JEV_MAX_ATTEMPTS {
+    let mut attempt = 1;
+    loop {
         let response = client
             .post(TYPESAFE_URL)
             .bearer_auth(api_key)
@@ -244,21 +245,21 @@ pub(crate) fn triage_issues(
                 timeout: error.is_timeout(),
             })?;
         let status = response.status().as_u16();
-        let body = response.text().map_err(|error| JevError::HttpRequest {
-            timeout: error.is_timeout(),
-        })?;
-        if !(200..300).contains(&status) {
-            if retry_jev_status(status) && attempt + 1 < JEV_MAX_ATTEMPTS {
-                thread::sleep(jev_retry_delay(attempt));
+        if !response.status().is_success() {
+            if retry_jev_status(status) && attempt < JEV_MAX_ATTEMPTS {
+                thread::sleep(jev_retry_delay(attempt - 1));
+                attempt += 1;
                 continue;
             }
             return Err(JevError::HttpStatus { status });
         }
+        let body = response.text().map_err(|error| JevError::HttpRequest {
+            timeout: error.is_timeout(),
+        })?;
         let issue_count = issues.len();
         let scores = parse_jev_answers(&body, issue_count)?;
         return Ok(rank_issues(issues, scores));
     }
-    Err(JevError::HttpStatus { status: 429 })
 }
 
 #[cfg(test)]

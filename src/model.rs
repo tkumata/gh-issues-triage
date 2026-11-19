@@ -243,6 +243,10 @@ pub(crate) struct RankedIssue {
     pub(crate) readiness: Readiness,
 }
 
+pub(crate) fn branch_name(issue: &RankedIssue) -> String {
+    format!("{}/issue-{}", issue.prefix, issue.issue.number)
+}
+
 pub(crate) fn search_issues(issues: &[RankedIssue], query: &str) -> Vec<RankedIssue> {
     let query = query.to_ascii_lowercase();
     issues
