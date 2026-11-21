@@ -133,10 +133,12 @@ impl Dialog {
         text: &str,
         buttons: &[&'static str],
     ) -> Result<Self, DisplayError> {
-        Self::with_height(
-            terminal_width,
-            terminal_height,
-            terminal_height.saturating_sub(4),
+        Self::with_dimensions(
+            (terminal_width, terminal_height),
+            (
+                terminal_width.saturating_sub(4),
+                terminal_height.saturating_sub(4),
+            ),
             title,
             text,
             buttons,
@@ -144,22 +146,26 @@ impl Dialog {
     }
 
     pub(crate) fn search(width: usize, height: usize) -> Result<Self, DisplayError> {
-        let dialog = Self::with_height(width, height, 7, "Search", "", &[CLOSE_BUTTON])?;
+        let dialog = Self::with_dimensions(
+            (width, height),
+            (width * 3 / 4, 7),
+            "Search",
+            "",
+            &[CLOSE_BUTTON],
+        )?;
         if dialog.width < 37 {
             return Err(DisplayError::TerminalWidthTooSmall { width });
         }
         Ok(dialog)
     }
 
-    fn with_height(
-        terminal_width: usize,
-        terminal_height: usize,
-        height: usize,
+    fn with_dimensions(
+        (terminal_width, terminal_height): (usize, usize),
+        (width, height): (usize, usize),
         title: &str,
         text: &str,
         buttons: &[&'static str],
     ) -> Result<Self, DisplayError> {
-        let width = terminal_width * 3 / 4;
         let buttons_width = buttons.iter().map(|button| button.len()).sum::<usize>()
             + buttons.len().saturating_sub(1);
         if width < 30 || width < buttons_width + 4 {
@@ -765,7 +771,7 @@ mod tests {
 
     #[test]
     fn dialog_dimensions_fixed_buttons_and_unicode_content_stay_in_bounds() {
-        for (width, height) in [(80, 24), (101, 31), (120, 40)] {
+        for (width, height) in [(34, 11), (80, 24), (101, 31), (120, 40)] {
             let dialog = Dialog::new(
                 width,
                 height,
@@ -777,8 +783,9 @@ mod tests {
             let Ok(dialog) = dialog else {
                 return;
             };
-            assert_eq!(dialog.width, width * 3 / 4);
+            assert_eq!(dialog.width, width - 4);
             assert_eq!(dialog.lines(0).len(), height - 4);
+            assert_eq!((dialog.left, dialog.top), (3, 3));
             for scroll in [0, dialog.max_scroll()] {
                 let lines = dialog.lines(scroll);
                 assert!(lines.iter().all(|line| {
@@ -808,7 +815,7 @@ mod tests {
             assert!(dialog.content_contains(dialog.left + 2, dialog.top + 3));
             assert!(!dialog.content_contains(dialog.left + 2, dialog.button_y));
         }
-        assert!(Dialog::new(39, 24, "", "", &[CLOSE_BUTTON]).is_err());
+        assert!(Dialog::new(33, 24, "", "", &[CLOSE_BUTTON]).is_err());
         assert!(Dialog::new(80, 10, "", "", &[CLOSE_BUTTON]).is_err());
     }
 
