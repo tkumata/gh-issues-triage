@@ -416,7 +416,7 @@ impl SearchState {
     }
 }
 
-const TERMINAL_RESTORE: &str = "\x1b[?2004l\x1b[?1003l\x1b[?1000l\x1b[?1006l\x1b[?1049l";
+const TERMINAL_RESTORE: &str = "\x1b[22m\x1b[?2004l\x1b[?1003l\x1b[?1000l\x1b[?1006l\x1b[?1049l";
 const TERMINAL_ENTER: &str = "\x1b[?1049h\x1b[?1000h\x1b[?1003h\x1b[?1006h\x1b[?2004h";
 
 fn parse_mouse_event(sequence: &str) -> Option<ActionInput> {
@@ -581,22 +581,24 @@ fn draw_view(
     lines: &[String],
     scroll: usize,
     viewport_rows: usize,
-    help: &[String],
-    header: &[String],
+    footer: &[String],
+    dimmed: bool,
 ) -> Result<(), String> {
     write!(stdout, "\x1b[2J\x1b[H").map_err(|error| error.to_string())?;
-    for (row, line) in header.iter().enumerate() {
-        write!(stdout, "\x1b[{};1H\x1b[2K{line}", row + 1).map_err(|error| error.to_string())?;
+    if dimmed {
+        write!(stdout, "\x1b[2m").map_err(|error| error.to_string())?;
     }
     let visible = visible_lines(lines, scroll, viewport_rows);
     for row in 0..viewport_rows {
         let line = visible.get(row).copied().unwrap_or("");
-        write!(stdout, "\x1b[{};1H\x1b[2K{line}", header.len() + row + 1)
-            .map_err(|error| error.to_string())?;
+        write!(stdout, "\x1b[{};1H\x1b[2K{line}", row + 1).map_err(|error| error.to_string())?;
     }
-    for (index, line) in help.iter().enumerate() {
-        let row = header.len() + viewport_rows + index + 1;
+    for (index, line) in footer.iter().enumerate() {
+        let row = viewport_rows + index + 1;
         write!(stdout, "\x1b[{row};1H\x1b[2K{line}").map_err(|error| error.to_string())?;
+    }
+    if dimmed {
+        write!(stdout, "\x1b[22m").map_err(|error| error.to_string())?;
     }
     stdout.flush().map_err(|error| error.to_string())
 }
@@ -707,28 +709,32 @@ fn draw_list_view(
     table: &RenderedTable,
     list: &mut ListState,
     height: usize,
+    dimmed: bool,
 ) -> Result<usize, String> {
     let mut footer = table.branch_errors.clone();
-    footer.push(
+    footer.push(if dimmed {
+        LIST_BUTTONS.join(" ")
+    } else {
         LIST_BUTTONS
             .iter()
             .map(|button| format!("\x1b[7m{button}\x1b[27m"))
             .collect::<Vec<_>>()
-            .join(" "),
-    );
+            .join(" ")
+    });
     let viewport_rows = height.saturating_sub(footer.len());
     if viewport_rows == 0 {
         return Err("terminal is too short to show issue actions".to_owned());
     }
     let max_scroll = table.text.lines().count().saturating_sub(viewport_rows);
     list.scroll = list.scroll.min(max_scroll);
+    let highlighted = if dimmed { None } else { list.selected };
     draw_view(
         stdout,
-        &table.lines(list.selected),
+        &table.lines(highlighted),
         list.scroll,
         viewport_rows,
         &footer,
-        &[],
+        dimmed,
     )?;
     Ok(viewport_rows)
 }
@@ -787,7 +793,7 @@ fn run_branch_actions(
         let viewport_rows = if let Some(rows) = drawn_rows {
             rows
         } else {
-            let rows = draw_list_view(&mut stdout, &table, &mut list, height)?;
+            let rows = draw_list_view(&mut stdout, &table, &mut list, height, false)?;
             drawn_rows = Some(rows);
             rows
         };
@@ -799,6 +805,7 @@ fn run_branch_actions(
             Some(b'h') => {
                 let dialog = Dialog::new(width, height, "Help", HELP_TEXT, &[CLOSE_BUTTON])
                     .map_err(|error| error.to_string())?;
+                draw_list_view(&mut stdout, &table, &mut list, height, true)?;
                 if show_dialog(&dialog, &mut stdin, &mut stdout, &mut input_state)?
                     == DialogResult::Quit
                 {
@@ -808,6 +815,7 @@ fn run_branch_actions(
                 continue;
             }
             Some(b's') => {
+                draw_list_view(&mut stdout, &table, &mut list, height, true)?;
                 match show_search(
                     &mut search,
                     (width, height),
@@ -845,6 +853,7 @@ fn run_branch_actions(
                 else {
                     continue;
                 };
+                draw_list_view(&mut stdout, &table, &mut list, height, true)?;
                 match show_issue(
                     |issue| branch::create_branch(repository, issue),
                     issue,
@@ -1247,6 +1256,48 @@ mod interaction_tests {
                 readiness: model::Readiness::Yes,
             })
             .to_vec()
+    }
+
+    #[test]
+    fn dimmed_list_leaves_dialog_and_restored_list_at_normal_intensity() {
+        let table = render_issue_table(
+            &issues(),
+            100,
+            &Err("missing branch information".into()),
+            IssueSort::default(),
+        );
+        assert!(table.is_ok());
+        let Ok(table) = table else { return };
+        let mut list = ListState {
+            selected: Some(0),
+            ..ListState::default()
+        };
+        let mut output = Vec::new();
+        assert!(draw_list_view(&mut output, &table, &mut list, 24, true).is_ok());
+        let dialog = Dialog::search(100, 24);
+        assert!(dialog.is_ok());
+        let Ok(dialog) = dialog else { return };
+        assert!(draw_dialog(&mut output, &dialog, 0).is_ok());
+        assert!(draw_list_view(&mut output, &table, &mut list, 24, false).is_ok());
+
+        let output = String::from_utf8_lossy(&output);
+        let frames = output.split("\x1b[2J\x1b[H").collect::<Vec<_>>();
+        assert_eq!(frames.len(), 3);
+        let [_, dimmed, restored] = frames.as_slice() else {
+            return;
+        };
+        let (background, overlay) = dimmed.split_once("\x1b[22m").unwrap_or_default();
+        assert!(background.starts_with("\x1b[2m"));
+        assert!(background.contains("issue 42"));
+        assert!(background.contains("missing branch information"));
+        assert!(background.ends_with(&LIST_BUTTONS.join(" ")));
+        assert!(!background.contains("\x1b[7m"));
+        assert!(!background.contains("\x1b[30;104m"));
+        assert!(overlay.contains(&format!("\x1b[7m{CLOSE_BUTTON}\x1b[27m")));
+        assert!(restored.contains("\x1b[30;104m"));
+        assert!(restored.contains("\x1b[7m   HELP   \x1b[27m"));
+        assert!(!restored.contains("\x1b[2m"));
+        assert_eq!(list.selected, Some(0));
     }
 
     #[test]
@@ -1676,7 +1727,7 @@ mod interaction_tests {
         }
         let mut output = Vec::new();
         assert_eq!(
-            draw_list_view(&mut output, &table, &mut list, 24).ok(),
+            draw_list_view(&mut output, &table, &mut list, 24, false).ok(),
             Some(23)
         );
         let output = String::from_utf8(output).map_err(|e| e.to_string());
